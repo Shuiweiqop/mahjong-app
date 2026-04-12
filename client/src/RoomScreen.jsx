@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import { io } from 'socket.io-client';
 
-const BASE = 'http://localhost:3001';
+const BASE = 'https://mahjong-app-production.up.railway.app';
 
 // ── Styles ───────────────────────────────────────────────
 const s = {

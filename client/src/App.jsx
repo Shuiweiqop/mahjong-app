@@ -3,7 +3,7 @@ import CalculatorScreen from './CalculatorScreen.jsx';
 import RoomScreen from './RoomScreen.jsx';
 import './index.css';
 
-const BASE = 'http://localhost:3001';
+const BASE = 'https://mahjong-app-production.up.railway.app';
 const api = {
   getSessions: () => fetch(`${BASE}/api/sessions`).then(r => r.json()),
   getSession: (id) => fetch(`${BASE}/api/sessions/${id}`).then(r => r.json()),
