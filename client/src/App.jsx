@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import AuthScreen from './AuthScreen.jsx';
 import CalculatorScreen from './CalculatorScreen.jsx';
 import RoomScreen from './RoomScreen.jsx';
 import './index.css';
@@ -61,7 +62,7 @@ const s = {
 };
 
 // ── Home Screen ─────────────────────────────────────────
-function HomeScreen({ onNewGame, onOpenGame, onCalc, onRoom }) {
+function HomeScreen({ onNewGame, onOpenGame, onCalc, onRoom, user, onLogout }) {
   const [sessions, setSessions] = useState([]);
 
   useEffect(() => {
@@ -73,6 +74,20 @@ function HomeScreen({ onNewGame, onOpenGame, onCalc, onRoom }) {
       <div style={s.header}>
         <h1 style={s.title}>🀄 麻将记分</h1>
         <p style={s.sub}>MAHJONG SCORE TRACKER</p>
+      </div>
+
+      <div style={{ textAlign: 'right', marginBottom: 16 }}>
+        <span style={{ fontSize: 12, color: 'var(--muted)' }}>
+          {user?.name}
+        </span>
+        <button onClick={onLogout} style={{
+          background: 'transparent', border: 'none',
+          color: 'var(--muted)', cursor: 'pointer',
+          fontSize: 11, marginLeft: 12,
+          fontFamily: 'DM Mono, monospace',
+        }}>
+          登出
+        </button>
       </div>
 
       <button style={{ ...s.btnGold, width: '100%', marginBottom: 10, padding: 14 }}
@@ -329,10 +344,30 @@ export default function App() {
   const urlParams = new URLSearchParams(window.location.search);
   const initialRoom = urlParams.get('room');
 
+  const savedUser = localStorage.getItem('user');
+  const [user, setUser] = useState(savedUser ? JSON.parse(savedUser) : null);
   const [screen, setScreen] = useState(initialRoom ? 'room' : 'home');
   const [sessionId, setSessionId] = useState(null);
 
   // 删掉 useEffect，不再需要
+
+  const handleLogin = (userData) => {
+    setUser(userData);
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('token');
+    localStorage.removeItem('user');
+    setUser(null);
+    setScreen('home');
+  };
+
+  if (!user) return (
+    <AuthScreen
+      onLogin={handleLogin}
+      onSkip={() => setUser({ name: '游客', guest: true })}
+    />
+  );
 
   if (screen === 'calc') return (
     <CalculatorScreen onBack={() => setScreen('home')} />
@@ -365,6 +400,8 @@ export default function App() {
       onOpenGame={id => { setSessionId(id); setScreen('game'); }}
       onCalc={() => setScreen('calc')}
       onRoom={() => setScreen('room')}
+      user={user}
+      onLogout={handleLogout}
     />
   );
 }

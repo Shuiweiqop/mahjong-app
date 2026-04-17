@@ -3,17 +3,14 @@ const mysql = require('mysql2/promise');
 const cors = require('cors');
 const http = require('http');
 const { Server } = require('socket.io');
+const authRoutes = require('./routes/auth');
 require('dotenv').config();
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, {
-  cors: { origin: '*' }
-});
+const io = new Server(server, { cors: { origin: '*' } });
 
-app.use(cors());
-app.use(express.json());
-
+// pool 必须在 authRoutes 之前定义
 const pool = mysql.createPool({
   host: process.env.DB_HOST,
   user: process.env.DB_USER,
@@ -21,6 +18,9 @@ const pool = mysql.createPool({
   database: process.env.DB_NAME,
 });
 
+app.use(cors());
+app.use(express.json());
+app.use('/api/auth', authRoutes(pool));
 // ── 生成6位房间码 ────────────────────────────────────────
 function generateRoomCode() {
   return Math.random().toString(36).substring(2, 8).toUpperCase();
