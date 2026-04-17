@@ -240,7 +240,7 @@ function RoomScoreboard({ sessionId, roomCode, onBack }) {
     }));
     await fetch(`${BASE}/api/sessions/${sessionId}/rounds`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify({ scores: entries }),
     });
     // 不需要手动 load()，socket 会推送更新
@@ -248,7 +248,10 @@ function RoomScoreboard({ sessionId, roomCode, onBack }) {
 
   const handleUndo = async () => {
     if (!confirm('删除最后一局？')) return;
-    await fetch(`${BASE}/api/sessions/${sessionId}/rounds/last`, { method: 'DELETE' });
+    await fetch(`${BASE}/api/sessions/${sessionId}/rounds/last`, {
+      method: 'DELETE',
+      headers: authHeaders(),
+    });
   };
 
   if (!data) return (
