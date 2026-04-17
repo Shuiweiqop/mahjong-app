@@ -3,6 +3,7 @@ const mysql = require('mysql2/promise');
 const cors = require('cors');
 const http = require('http');
 const { Server } = require('socket.io');
+const jwt = require('jsonwebtoken');
 const authRoutes = require('./routes/auth');
 require('dotenv').config();
 
@@ -18,6 +19,28 @@ const pool = mysql.createPool({
   database: process.env.DB_NAME,
 });
 
+const JWT_SECRET = process.env.JWT_SECRET || 'mahjong_secret_key';
+
+async function ensureSessionUserColumn() {
+  const [columns] = await pool.query(
+    'SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = ?',
+    [process.env.DB_NAME, 'sessions', 'user_id']
+  );
+  if (columns.length === 0) {
+    await pool.query('ALTER TABLE sessions ADD COLUMN user_id INT NULL, ADD INDEX idx_sessions_user_id (user_id)');
+  }
+}
+
+function getOptionalUser(req) {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return null;
+  try {
+    return jwt.verify(token, JWT_SECRET);
+  } catch {
+    return null;
+  }
+}
+
 app.use(cors());
 app.use(express.json());
 app.use('/api/auth', authRoutes(pool));
@@ -30,12 +53,13 @@ function generateRoomCode() {
 
 app.post('/api/sessions', async (req, res) => {
   const { name, players } = req.body;
+  const user = getOptionalUser(req);
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
     const roomCode = generateRoomCode();
     const [session] = await conn.query(
-      'INSERT INTO sessions (name, room_code) VALUES (?, ?)', [name, roomCode]
+      'INSERT INTO sessions (name, room_code, user_id) VALUES (?, ?, ?)', [name, roomCode, user?.id || null]
     );
     const sessionId = session.insertId;
     for (const playerName of players) {
@@ -54,7 +78,10 @@ app.post('/api/sessions', async (req, res) => {
 });
 
 app.get('/api/sessions', async (req, res) => {
-  const [rows] = await pool.query('SELECT * FROM sessions ORDER BY created_at DESC');
+  const user = getOptionalUser(req);
+  const [rows] = user
+    ? await pool.query('SELECT * FROM sessions WHERE user_id = ? ORDER BY created_at DESC', [user.id])
+    : await pool.query('SELECT * FROM sessions WHERE user_id IS NULL ORDER BY created_at DESC');
   res.json(rows);
 });
 
@@ -194,16 +221,31 @@ app.get('/api/ping', async (req, res) => {
   res.json({ ok: true });
 });
 
-server.listen(process.env.PORT, () => {
-  console.log(`Server running on port ${process.env.PORT}`);
-});
+ensureSessionUserColumn()
+  .then(() => {
+    server.listen(process.env.PORT, () => {
+      console.log(`Server running on port ${process.env.PORT}`);
+    });
+  })
+  .catch((err) => {
+    console.error('Failed to prepare database schema:', err);
+    process.exit(1);
+  });
 
 // 删除整局游戏
 app.delete('/api/sessions/:id', async (req, res) => {
   const { id } = req.params;
+  const user = getOptionalUser(req);
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
+    const [sessions] = user
+      ? await conn.query('SELECT id FROM sessions WHERE id = ? AND user_id = ?', [id, user.id])
+      : await conn.query('SELECT id FROM sessions WHERE id = ? AND user_id IS NULL', [id]);
+    if (sessions.length === 0) {
+      await conn.rollback();
+      return res.status(404).json({ error: 'Session not found' });
+    }
     const [rounds] = await conn.query('SELECT id FROM rounds WHERE session_id = ?', [id]);
     for (const r of rounds) {
       await conn.query('DELETE FROM round_scores WHERE round_id = ?', [r.id]);

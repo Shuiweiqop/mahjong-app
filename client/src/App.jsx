@@ -5,27 +5,36 @@ import RoomScreen from './RoomScreen.jsx';
 import './index.css';
 
 const BASE = 'https://mahjong-app-production.up.railway.app';
+const authHeaders = () => {
+  const token = localStorage.getItem('token');
+  return token ? { Authorization: `Bearer ${token}` } : {};
+};
 const api = {
-  getSessions: () => fetch(`${BASE}/api/sessions`).then(r => r.json()),
-  getSession: (id) => fetch(`${BASE}/api/sessions/${id}`).then(r => r.json()),
+  getSessions: () => fetch(`${BASE}/api/sessions`, {
+    headers: authHeaders(),
+  }).then(r => r.json()),
+  getSession: (id) => fetch(`${BASE}/api/sessions/${id}`, {
+    headers: authHeaders(),
+  }).then(r => r.json()),
   createSession: (name, players) =>
     fetch(`${BASE}/api/sessions`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify({ name, players }),
     }).then(r => r.json()),
   addRound: (sessionId, scores) =>
     fetch(`${BASE}/api/sessions/${sessionId}/rounds`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify({ scores }),
     }).then(r => r.json()),
   deleteLastRound: (sessionId) =>
     fetch(`${BASE}/api/sessions/${sessionId}/rounds/last`, {
       method: 'DELETE',
+      headers: authHeaders(),
     }).then(r => r.json()),
     deleteSession: (id) =>
-  fetch(`${BASE}/api/sessions/${id}`, { method: 'DELETE' }).then(r => r.json()),
+  fetch(`${BASE}/api/sessions/${id}`, { method: 'DELETE', headers: authHeaders() }).then(r => r.json()),
 };
 
 // ── Styles ──────────────────────────────────────────────

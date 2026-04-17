@@ -3,6 +3,10 @@ import { QRCodeSVG } from 'qrcode.react';
 import { io } from 'socket.io-client';
 
 const BASE = 'https://mahjong-app-production.up.railway.app';
+const authHeaders = () => {
+  const token = localStorage.getItem('token');
+  return token ? { Authorization: `Bearer ${token}` } : {};
+};
 
 // ── Styles ───────────────────────────────────────────────
 const s = {
@@ -113,7 +117,7 @@ function CreateRoom({ onCreated }) {
     try {
       const res = await fetch(`${BASE}/api/sessions`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({ name: name || '新局', players: filled }),
       }).then(r => r.json());
       onCreated(res.sessionId, res.roomCode);
