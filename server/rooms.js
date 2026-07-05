@@ -30,6 +30,7 @@ function createRoom(gameId, creator) {
     hostId: creator.id,
     members: [{ id: creator.id, name: creator.name }],
     state: null,       // 开始前为 null
+    config: {},        // 房主在大厅设置的游戏配置
     timer: null,
   };
   rooms.set(code, room);
@@ -68,9 +69,9 @@ function leaveRoom(code, memberId) {
   if (room.hostId === memberId) room.hostId = room.members[0].id;
 }
 
-// 开始对局(用当前成员创建初始状态)
+// 开始对局(用当前成员 + 房主配置创建初始状态)
 function startGame(room) {
-  room.state = room.game.createInitialState(room.members);
+  room.state = room.game.createInitialState(room.members, room.config);
   room.state.hostId = room.hostId;
   return room.state;
 }

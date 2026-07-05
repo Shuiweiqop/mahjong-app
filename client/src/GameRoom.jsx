@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import DrawCanvas from './DrawCanvas';
+import LobbySettings from './LobbySettings';
 import { ui } from './ui';
 
 // 你画我猜房间。socket 已连接并已 create/join。
@@ -111,6 +112,13 @@ export default function GameRoom({ socket, roomCode, me, onLeave }) {
             </div>
           ))}
         </div>
+
+        <LobbySettings
+          lobby={lobby}
+          isHost={isHost}
+          onChange={(config) => socket.current?.emit('set_config', { config })}
+        />
+
         {isHost ? (
           <button style={{ ...ui.btnAccent, width: '100%' }} disabled={members.length < minPlayers}
             onClick={() => act({ type: 'start' })}>

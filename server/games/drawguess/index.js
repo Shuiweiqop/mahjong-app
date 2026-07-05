@@ -8,25 +8,41 @@
 //
 // 状态全部放内存(由上层 rooms 管理器持有)。纯逻辑,不碰 socket/db,便于测试。
 
-const { pickWords } = require('./words');
+const { pickWords, buildWordPool } = require('./words');
 
-const DRAW_SECONDS = 80;        // 每轮作画时长
 const REVEAL_SECONDS = 5;       // 揭晓/间隔时长
 const PICK_SECONDS = 15;        // 画手选词时长
-const ROUNDS_PER_PLAYER = 2;    // 每个玩家当几次画手
+
+// 房主可配置项的默认值与取值范围
+const DEFAULTS = { drawSeconds: 80, roundsPerPlayer: 2, categories: [], customWords: [] };
+const DRAW_SECONDS_OPTIONS = [45, 60, 80, 120];
+const ROUNDS_OPTIONS = [1, 2, 3];
 
 const now = () => Date.now();
 
+// 规整房主传入的配置,防非法值
+function normalizeConfig(cfg = {}) {
+  const drawSeconds = DRAW_SECONDS_OPTIONS.includes(cfg.drawSeconds) ? cfg.drawSeconds : DEFAULTS.drawSeconds;
+  const roundsPerPlayer = ROUNDS_OPTIONS.includes(cfg.roundsPerPlayer) ? cfg.roundsPerPlayer : DEFAULTS.roundsPerPlayer;
+  const categories = Array.isArray(cfg.categories) ? cfg.categories : [];
+  const customWords = Array.isArray(cfg.customWords)
+    ? cfg.customWords.map((w) => String(w).trim()).filter(Boolean).slice(0, 100)
+    : [];
+  return { drawSeconds, roundsPerPlayer, categories, customWords };
+}
+
 // ── 创建初始状态 ──────────────────────────────────────────
-// players: [{ id, name }]
-function createInitialState(players) {
+// players: [{ id, name }];  config: 房主设置(可选)
+function createInitialState(players, config) {
+  const cfg = normalizeConfig(config);
+  const pool = buildWordPool({ categories: cfg.categories, customWords: cfg.customWords });
   return {
     phase: 'lobby',                 // lobby | pick | draw | reveal | ended
     players: players.map((p) => ({ id: p.id, name: p.name })),
     scores: Object.fromEntries(players.map((p) => [p.id, 0])),
     order: players.map((p) => p.id),// 画手轮转顺序
     turnIndex: -1,                  // 当前在 order 里的位置
-    roundsTotal: players.length * ROUNDS_PER_PLAYER,
+    roundsTotal: players.length * cfg.roundsPerPlayer,
     roundsDone: 0,
     drawerId: null,
     wordChoices: [],                // 画手选词阶段的候选
@@ -36,6 +52,8 @@ function createInitialState(players) {
     strokes: [],                    // 当前轮已画笔画(用于中途加入者补画)
     deadline: null,                 // 当前阶段截止时间戳(ms)
     hostId: players[0]?.id || null,
+    cfg,                            // 保存配置供后续使用
+    wordPool: pool,                 // 该局词池
   };
 }
 
@@ -56,7 +74,7 @@ function startNextTurn(state) {
   state.word = null;
   state.strokes = [];
   state.guessedThisRound = {};
-  state.wordChoices = pickWords(3, state.usedWords).map((w) => w.word);
+  state.wordChoices = pickWords(3, state.usedWords, state.wordPool).map((w) => w.word);
   state.deadline = now() + PICK_SECONDS * 1000;
   events.push({ type: 'round_changed', drawerId: state.drawerId });
   return events;
@@ -98,7 +116,7 @@ function applyAction(state, action, playerId) {
       state.usedWords.push(action.word);
       state.wordChoices = [];
       state.phase = 'draw';
-      state.deadline = now() + DRAW_SECONDS * 1000;
+      state.deadline = now() + state.cfg.drawSeconds * 1000;
       events.push({ type: 'draw_started', deadline: state.deadline });
       return { state, events };
     }
@@ -132,7 +150,7 @@ function applyAction(state, action, playerId) {
       if (correct) {
         // 计分:剩余时间越多分越高;画手也按猜中人数得分
         const remaining = Math.max(0, (state.deadline - now()) / 1000);
-        const pts = 100 + Math.round((remaining / DRAW_SECONDS) * 100);
+        const pts = 100 + Math.round((remaining / state.cfg.drawSeconds) * 100);
         state.scores[playerId] = (state.scores[playerId] || 0) + pts;
         state.guessedThisRound[playerId] = pts;
         state.scores[state.drawerId] = (state.scores[state.drawerId] || 0) + 25;
@@ -210,6 +228,8 @@ function isGameOver(state) {
   return { over: true, ranking };
 }
 
+const { CATEGORIES } = require('./words');
+
 module.exports = {
   id: 'drawguess',
   displayName: '你画我猜',
@@ -219,8 +239,12 @@ module.exports = {
   applyAction,
   serializeStateFor,
   isGameOver,
-  // 供上层计时器使用
-  DRAW_SECONDS,
+  // 房主配置元数据(供前端设置面板)
+  configSchema: {
+    drawSeconds: { options: DRAW_SECONDS_OPTIONS, default: DEFAULTS.drawSeconds },
+    roundsPerPlayer: { options: ROUNDS_OPTIONS, default: DEFAULTS.roundsPerPlayer },
+    categories: CATEGORIES,
+  },
   REVEAL_SECONDS,
   PICK_SECONDS,
 };

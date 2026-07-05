@@ -117,10 +117,7 @@ io.on('connection', (socket) => {
     if (room.state) {
       socket.emit('game_state', room.game.serializeStateFor(room.state, user.id));
     } else {
-      socket.emit('lobby', {
-        code: room.code, gameId: room.gameId, hostId: room.hostId,
-        members: room.members, minPlayers: room.game.minPlayers, maxPlayers: room.game.maxPlayers,
-      });
+      socket.emit('lobby', lobbyPayload(room));
     }
   });
 
@@ -143,6 +140,17 @@ io.on('connection', (socket) => {
     cb?.({ roomCode: room.code, hostId: room.hostId, playerId: user.id });
     if (room.state) broadcastState(room);
     else broadcastLobby(room);
+  });
+
+  // 房主在大厅更新游戏配置
+  socket.on('set_config', ({ config }, cb) => {
+    const room = roomsMgr.getRoom(socket.data.roomCode);
+    if (!room) return cb?.({ error: '不在房间中' });
+    if (user.id !== room.hostId) return cb?.({ error: '只有房主能设置' });
+    if (room.state) return cb?.({ error: '游戏已开始' });
+    room.config = { ...room.config, ...config };
+    cb?.({ ok: true });
+    broadcastLobby(room); // 广播给所有人,同步设置显示
   });
 
   socket.on('game_action', ({ action }, cb) => {
@@ -174,16 +182,21 @@ io.on('connection', (socket) => {
   });
 });
 
-// 大厅态(未开始):广播成员列表
-function broadcastLobby(room) {
-  io.to(room.code).emit('lobby', {
+// 大厅 payload(成员 + 房主配置 + 配置元数据),sync 与广播共用
+function lobbyPayload(room) {
+  return {
     code: room.code,
     gameId: room.gameId,
     hostId: room.hostId,
     members: room.members,
     minPlayers: room.game.minPlayers,
     maxPlayers: room.game.maxPlayers,
-  });
+    config: room.config,
+    configSchema: room.game.configSchema || null,
+  };
+}
+function broadcastLobby(room) {
+  io.to(room.code).emit('lobby', lobbyPayload(room));
 }
 
 db.ensureSchema()

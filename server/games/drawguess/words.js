@@ -15,18 +15,33 @@ const ALL_WORDS = Object.entries(WORDS).flatMap(([category, list]) =>
   list.map((word) => ({ word, category }))
 );
 
-// 随机取 n 个不重复的词,供画手选择(标准玩法:给 3 个词选 1 个)
-function pickWords(n = 3, exclude = []) {
-  const pool = ALL_WORDS.filter((w) => !exclude.includes(w.word));
+// 根据房主配置构建词池:
+//   categories: 选定的分类数组(空=全部)
+//   customWords: 房主自定义词数组(有则只用它)
+function buildWordPool({ categories, customWords } = {}) {
+  if (customWords && customWords.length) {
+    return customWords.map((w) => ({ word: String(w).trim(), category: '自定义' })).filter((w) => w.word);
+  }
+  if (categories && categories.length) {
+    return ALL_WORDS.filter((w) => categories.includes(w.category));
+  }
+  return ALL_WORDS;
+}
+
+// 从给定词池随机取 n 个不重复的词(exclude 已用过的)
+function pickWords(n = 3, exclude = [], pool = ALL_WORDS) {
+  const avail = pool.filter((w) => !exclude.includes(w.word));
   const picked = [];
   const used = new Set();
-  while (picked.length < n && picked.length < pool.length) {
-    const idx = Math.floor(Math.random() * pool.length);
+  while (picked.length < n && picked.length < avail.length) {
+    const idx = Math.floor(Math.random() * avail.length);
     if (used.has(idx)) continue;
     used.add(idx);
-    picked.push(pool[idx]);
+    picked.push(avail[idx]);
   }
   return picked;
 }
 
-module.exports = { WORDS, ALL_WORDS, pickWords };
+const CATEGORIES = Object.keys(WORDS); // 供前端下拉
+
+module.exports = { WORDS, ALL_WORDS, CATEGORIES, buildWordPool, pickWords };
