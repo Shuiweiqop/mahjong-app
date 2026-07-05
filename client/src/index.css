@@ -1,36 +1,40 @@
-@import url('https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;700&family=DM+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&family=DM+Mono:wght@400;500&display=swap');
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
 :root {
-  --bg: #0f0a00;
-  --surface: #1c1200;
-  --border: #3a2800;
-  --red: #c0392b;
-  --gold: #d4a017;
-  --gold-light: #f0c040;
-  --text: #f5e6c8;
-  --muted: #7a6a50;
+  --bg: #0f1226;
+  --surface: #1a1f3d;
+  --surface-2: #232a52;
+  --border: #333c6e;
+  --primary: #6c7dfc;
+  --primary-light: #8b9aff;
+  --accent: #ffb547;
+  --success: #3ecf8e;
+  --danger: #ff6b6b;
+  --text: #eef1ff;
+  --muted: #8b93c4;
 }
 
 body {
   background: var(--bg);
   color: var(--text);
-  font-family: 'DM Mono', monospace;
+  font-family: 'Nunito', system-ui, sans-serif;
   min-height: 100vh;
 }
 
-h1, h2, h3 {
-  font-family: 'Noto Serif SC', serif;
+h1, h2, h3 { font-family: 'Nunito', sans-serif; font-weight: 800; }
+
+button { font-family: inherit; }
+
+input {
+  font-family: inherit;
 }
+
 @media (max-width: 480px) {
   body { font-size: 14px; }
 }
 
-input[type=number]::-webkit-inner-spin-button,
-input[type=number]::-webkit-outer-spin-button {
-  -webkit-appearance: none;
-}
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.3; }
