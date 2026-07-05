@@ -45,6 +45,7 @@ export default function GameRoom({ socket, roomCode, me, onLeave }) {
     const onGuessed = ({ playerId, points }) => addMsg(`✅ ${localName(playerId)} 猜中了! (+${points})`, 'success');
     const onReveal = ({ word }) => addMsg(`本轮答案是:${word}`, 'accent');
     const onGameOver = () => addMsg('🏁 游戏结束!', 'accent');
+    const onKicked = () => { alert('你已被房主移出房间'); onLeave(); };
 
     s.on('lobby', onLobby);
     s.on('game_state', onState);
@@ -54,12 +55,13 @@ export default function GameRoom({ socket, roomCode, me, onLeave }) {
     s.on('guessed', onGuessed);
     s.on('reveal', onReveal);
     s.on('game_over', onGameOver);
+    s.on('kicked', onKicked);
     // 监听器就绪后主动拉一次当前状态(修复:错过创建/加入时首个 lobby 广播的竞态)
     s.emit('sync');
     return () => {
       s.off('lobby', onLobby); s.off('game_state', onState); s.off('stroke', onStroke);
       s.off('clear', onClear); s.off('chat', onChat); s.off('guessed', onGuessed);
-      s.off('reveal', onReveal); s.off('game_over', onGameOver);
+      s.off('reveal', onReveal); s.off('game_over', onGameOver); s.off('kicked', onKicked);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -109,6 +111,13 @@ export default function GameRoom({ socket, roomCode, me, onLeave }) {
             <div key={p.id} style={{ padding: '8px 0', display: 'flex', gap: 8, alignItems: 'center' }}>
               <span>{p.id === hostId ? '👑' : '🙂'}</span>
               <span>{p.name}{p.id === me.id ? ' (你)' : ''}</span>
+              {isHost && p.id !== me.id && (
+                <button
+                  onClick={() => socket.current?.emit('kick_player', { playerId: p.id })}
+                  style={{ marginLeft: 'auto', background: 'transparent', color: 'var(--danger)',
+                    border: '1px solid var(--border)', borderRadius: 8, padding: '2px 10px',
+                    cursor: 'pointer', fontSize: 12 }}>踢出</button>
+              )}
             </div>
           ))}
         </div>

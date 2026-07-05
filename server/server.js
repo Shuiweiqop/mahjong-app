@@ -153,6 +153,28 @@ io.on('connection', (socket) => {
     broadcastLobby(room); // 广播给所有人,同步设置显示
   });
 
+  // 房主踢人(仅大厅阶段)
+  socket.on('kick_player', ({ playerId }, cb) => {
+    const room = roomsMgr.getRoom(socket.data.roomCode);
+    if (!room) return cb?.({ error: '不在房间中' });
+    if (user.id !== room.hostId) return cb?.({ error: '只有房主能踢人' });
+    if (room.state) return cb?.({ error: '游戏进行中不能踢人' });
+    if (playerId === room.hostId) return cb?.({ error: '不能踢自己' });
+
+    const kickedSid = socketIdOf(room, playerId);
+    memberSockets.get(room.code)?.delete(playerId);
+    roomsMgr.leaveRoom(room.code, playerId);
+    cb?.({ ok: true });
+
+    // 通知被踢者并让其离开 socket 房间
+    if (kickedSid) {
+      io.to(kickedSid).emit('kicked');
+      io.sockets.sockets.get(kickedSid)?.leave(room.code);
+    }
+    const still = roomsMgr.getRoom(room.code);
+    if (still) broadcastLobby(still);
+  });
+
   socket.on('game_action', ({ action }, cb) => {
     const room = roomsMgr.getRoom(socket.data.roomCode);
     if (!room) return cb?.({ error: '不在房间中' });
