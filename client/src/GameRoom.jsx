@@ -78,11 +78,14 @@ export default function GameRoom({ socket, roomCode, me, onLeave }) {
 
   const secondsLeft = state?.deadline ? Math.max(0, Math.ceil((state.deadline - nowTs) / 1000)) : null;
   const isDrawer = state?.isDrawer;
-  const isHost = (lobby?.hostId || state?.hostId) === me.id;
+  const hostId = lobby?.hostId || state?.hostId;
+  const minPlayers = lobby?.minPlayers ?? 2;
+  const isHost = hostId === me.id;
   const joinUrl = `${window.location.origin}?room=${roomCode}`;
 
-  // ── 大厅(未开始):收到 lobby,且游戏尚未真正开始(无 state 或仍处 lobby 阶段) ──
-  if (lobby && (!state || state.phase === 'lobby')) {
+  // ── 大厅/等待(游戏未真正开始):只要没有进行中的对局(无 state 或仍 lobby 阶段)就显示大厅。
+  // 这样即使 lobby 事件还没到(sync 延迟),也不会错误掉进空白游戏界面。
+  if (!state || state.phase === 'lobby') {
     return (
       <div style={ui.wrap}>
         <TopBar roomCode={roomCode} onLeave={onLeave} />
@@ -95,18 +98,19 @@ export default function GameRoom({ socket, roomCode, me, onLeave }) {
           </div>
         </div>
         <div style={ui.card}>
-          <label style={ui.label}>玩家 ({members.length}/{lobby.maxPlayers})</label>
+          <label style={ui.label}>玩家 ({members.length}/{lobby?.maxPlayers ?? 8})</label>
+          {members.length === 0 && <p style={{ color: 'var(--muted)', fontSize: 13 }}>连接中…</p>}
           {members.map((p) => (
             <div key={p.id} style={{ padding: '8px 0', display: 'flex', gap: 8, alignItems: 'center' }}>
-              <span>{p.id === lobby.hostId ? '👑' : '🙂'}</span>
+              <span>{p.id === hostId ? '👑' : '🙂'}</span>
               <span>{p.name}{p.id === me.id ? ' (你)' : ''}</span>
             </div>
           ))}
         </div>
         {isHost ? (
-          <button style={{ ...ui.btnAccent, width: '100%' }} disabled={members.length < lobby.minPlayers}
+          <button style={{ ...ui.btnAccent, width: '100%' }} disabled={members.length < minPlayers}
             onClick={() => act({ type: 'start' })}>
-            {members.length < lobby.minPlayers ? `至少需要 ${lobby.minPlayers} 人` : '开始游戏'}
+            {members.length < minPlayers ? `至少需要 ${minPlayers} 人` : '开始游戏'}
           </button>
         ) : (
           <p style={{ textAlign: 'center', color: 'var(--muted)' }}>等待房主开始…</p>
