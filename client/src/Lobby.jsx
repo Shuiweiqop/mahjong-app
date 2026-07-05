@@ -3,8 +3,8 @@ import { API_BASE } from './config';
 import { ui } from './ui';
 
 // 大厅:选游戏 → 创建房间,或用房间码加入。
-// props: me, connected, onCreate(gameId), onJoin(code), initialRoom, onLogout
-export default function Lobby({ me, connected, onCreate, onJoin, initialRoom, onLogout }) {
+// props: me, connected, onCreate(gameId), onJoin(code), initialRoom, onLogout, onCalc
+export default function Lobby({ me, connected, onCreate, onJoin, initialRoom, onLogout, onCalc }) {
   const [games, setGames] = useState([]);
   const [code, setCode] = useState(initialRoom || '');
 
@@ -50,6 +50,17 @@ export default function Lobby({ me, connected, onCreate, onJoin, initialRoom, on
           <button style={ui.btn} disabled={!connected || code.length < 4} onClick={() => onJoin(code)}>加入</button>
         </div>
       </div>
+
+      {/* 低调的工具入口(算法演示,非游戏门面) */}
+      {onCalc && (
+        <div style={{ textAlign: 'center', marginTop: 24 }}>
+          <button onClick={onCalc}
+            style={{ background: 'transparent', border: 'none', color: 'var(--muted)',
+              fontSize: 12, cursor: 'pointer', textDecoration: 'underline' }}>
+            🀄 麻将番型计算器(算法工具)
+          </button>
+        </div>
+      )}
     </div>
   );
 }

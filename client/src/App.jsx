@@ -4,6 +4,7 @@ import { API_BASE } from './config';
 import AuthScreen from './AuthScreen.jsx';
 import Lobby from './Lobby.jsx';
 import GameRoom from './GameRoom.jsx';
+import CalculatorScreen from './CalculatorScreen.jsx';
 
 export default function App() {
   const urlRoom = new URLSearchParams(window.location.search).get('room');
@@ -62,6 +63,9 @@ export default function App() {
 
   if (!me) return <AuthScreen onLogin={handleLogin} onGuest={handleGuest} />;
 
+  if (screen === 'calc') {
+    return <CalculatorScreen onBack={() => setScreen('lobby')} />;
+  }
   if (screen === 'room' && room) {
     return (
       <GameRoom
@@ -75,6 +79,6 @@ export default function App() {
   }
   return (
     <Lobby me={me} connected={connected} onCreate={createRoom} onJoin={joinRoom}
-      initialRoom={urlRoom} onLogout={handleLogout} />
+      initialRoom={urlRoom} onLogout={handleLogout} onCalc={() => setScreen('calc')} />
   );
 }

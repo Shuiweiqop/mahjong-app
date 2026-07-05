@@ -302,6 +302,12 @@ export default function CalculatorScreen({ onBack }) {
   };
 
   return (
+    // 自带 scoped 配色变量(番型计算器的经典金/红主题),不依赖也不污染平台主题
+    <div style={{
+      '--gold': '#d4a017', '--gold-light': '#f0c040', '--red': '#c0392b',
+      '--surface': '#1c1200', '--border': '#3a2800', '--text': '#f5e6c8',
+      '--muted': '#7a6a50', minHeight: '100vh', background: '#0f0a00',
+    }}>
     <div style={C.wrap}>
       {onBack && <button style={C.backBtn} onClick={onBack}>← 返回</button>}
 
@@ -415,6 +421,7 @@ export default function CalculatorScreen({ onBack }) {
           )}
         </div>
       )}
+    </div>
     </div>
   );
 }
