@@ -1,5 +1,6 @@
-// 多人游戏平台 —— 新服务器入口(内存版,无数据库依赖)。
+// 多人游戏平台 —— 服务器入口。
 // Express(REST:auth + 游戏列表) + Socket.io(实时对局,服务端权威)。
+// 数据库:有 DATABASE_URL 用 Postgres(Supabase),否则内存降级(见 db.js)。
 
 const express = require('express');
 const http = require('http');
@@ -8,16 +9,22 @@ const jwt = require('jsonwebtoken');
 const { Server } = require('socket.io');
 require('dotenv').config();
 
-const { router: authRouter, JWT_SECRET } = require('./routes/authMemory');
+const { router: authRouter, JWT_SECRET } = require('./routes/auth');
 const { listGames } = require('./games/registry');
 const roomsMgr = require('./rooms');
+const db = require('./db');
 
 const PORT = process.env.PORT || 3001;
+// CORS:线上用 CLIENT_ORIGIN(逗号分隔)白名单;未设置则放开(本地开发)
+const ORIGINS = process.env.CLIENT_ORIGIN
+  ? process.env.CLIENT_ORIGIN.split(',').map((s) => s.trim())
+  : '*';
+
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: '*' } });
+const io = new Server(server, { cors: { origin: ORIGINS } });
 
-app.use(cors());
+app.use(cors({ origin: ORIGINS }));
 app.use(express.json());
 app.use('/api/auth', authRouter);
 app.get('/api/games', (req, res) => res.json(listGames()));
@@ -65,6 +72,9 @@ function broadcastState(room, extraEvents = []) {
       io.to(room.code).emit('reveal', { word: ev.word, reason: ev.reason });
     } else if (ev.type === 'game_over') {
       io.to(room.code).emit('game_over');
+      // 存战绩(登录用户才计入 user_id;内存模式下 db 层直接跳过)
+      const over = room.game.isGameOver(room.state);
+      if (over && over.ranking) db.saveGameResult(room.gameId, room.code, over.ranking);
     }
   }
 }
@@ -162,6 +172,13 @@ function broadcastLobby(room) {
   });
 }
 
-server.listen(PORT, () => {
-  console.log(`🎮 游戏平台服务器运行于 http://localhost:${PORT}`);
-});
+db.ensureSchema()
+  .then(() => {
+    server.listen(PORT, () => {
+      console.log(`🎮 游戏平台服务器运行于 http://localhost:${PORT}`);
+    });
+  })
+  .catch((err) => {
+    console.error('数据库初始化失败:', err.message);
+    process.exit(1);
+  });

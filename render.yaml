@@ -1,0 +1,17 @@
+# Render 部署配置(后端 Socket.io 服务)
+# 在 Render 控制台 New → Blueprint,选本仓库即可自动读取。
+services:
+  - type: web
+    name: playground-server
+    runtime: node
+    rootDir: server
+    buildCommand: npm install
+    startCommand: node server.js
+    plan: free
+    envVars:
+      - key: JWT_SECRET
+        generateValue: true       # Render 自动生成强密钥
+      - key: DATABASE_URL
+        sync: false               # 手动填 Supabase 连接串(带密码,勿入库)
+      - key: CLIENT_ORIGIN
+        sync: false               # 手动填 Vercel 前端域名,如 https://xxx.vercel.app
