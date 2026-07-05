@@ -1,7 +1,13 @@
 # Playground — 多人实时游戏平台 · 环境搭建指南
 
-一个可扩展的多人实时游戏平台。首个游戏:**你画我猜**(实时画布同步 + 服务端权威 + 信息隔离)。
-架构支持插入更多游戏(每个游戏实现统一接口)。
+一个可扩展的多人实时游戏平台。已内置两个游戏:
+- **你画我猜** — 实时画布同步、词库/回合可配、猜词计分。
+- **狼人杀** — 多阶段状态机(夜/昼/投票)、分角色信息隔离(狼见队友、预言家见查验、平民见公开)。
+
+均为**服务端权威**。房主可在大厅配置游戏(回合数/时长/词库/自定义词)、踢人、转移房主。
+另附一个可选**麻将番型计算器**工具页(算法演示)。
+
+架构支持插入更多游戏 —— 新增游戏 = 一个后端模块 + 一个前端视图组件 + 注册表一行。
 
 ---
 
@@ -14,29 +20,39 @@
 | 数据库 | PostgreSQL | **Supabase** |
 | 认证 | JWT(登录) + 访客模式 | — |
 
-**架构接缝**:通用层(大厅/房间/实时/认证) + 可插拔游戏模块接口
-(`createInitialState` / `applyAction` / `serializeStateFor` / `isGameOver`)。
-新游戏只需在 `server/games/` 实现该接口并在 `registry.js` 注册。
+**架构接缝**:通用层(大厅/房间/实时/认证) + 可插拔游戏模块接口。
+每个游戏(前后端各)实现统一接口:
+- 后端模块:`createInitialState(players, config)` / `applyAction(state, action, playerId)`
+  / `serializeStateFor(state, playerId)`(分玩家视图,信息隔离) / `isGameOver(state)`,
+  可选 `configSchema`(房主设置项)。在 `server/games/registry.js` 注册。
+- 前端视图组件:接收 `state / act / me / socket`,在 `client/src/GameRoom.jsx`
+  的 `GAME_VIEWS` 注册一行(按 `gameId` 分发)。
 
 ```
 mahjong-app/
-├── client/                 前端(Vite + React)
+├── client/                   前端(Vite + React)
 │   └── src/
-│       ├── App.jsx         顶层:认证→大厅→房间 + socket 连接
-│       ├── AuthScreen.jsx  登录/注册/访客
-│       ├── Lobby.jsx       选游戏 + 创建/加入房间
-│       ├── GameRoom.jsx    你画我猜房间(画布/猜词/计分/计时)
-│       ├── DrawCanvas.jsx  Canvas 画笔 + 实时笔画同步
-│       └── config.js       读 VITE_API_BASE(后端地址)
-└── server/                 后端(Express + Socket.io)
-    ├── server.js           入口:REST(auth/games) + Socket.io(对局)
-    ├── db.js               存储层:有 DATABASE_URL 用 Postgres,否则内存降级
-    ├── rooms.js            房间管理(内存)
-    ├── schema.sql          Postgres 建表脚本
-    ├── routes/auth.js      注册/登录/me
+│       ├── App.jsx           顶层:认证→大厅→房间 + socket 连接
+│       ├── AuthScreen.jsx    登录/注册/访客
+│       ├── Lobby.jsx         选游戏 + 创建/加入房间 + 麻将工具页入口
+│       ├── LobbySettings.jsx 房主大厅设置面板(回合/时长/词库/自定义词)
+│       ├── GameRoom.jsx      房间路由器:通用大厅 + 按 gameId 分发对局界面
+│       ├── DrawGuessGame.jsx 你画我猜对局界面(画布/猜词/计分/计时)
+│       ├── DrawCanvas.jsx    Canvas 画笔 + 实时笔画批量同步
+│       ├── WerewolfGame.jsx  狼人杀对局界面(角色卡/夜行动/投票/揭晓)
+│       ├── CalculatorScreen.jsx  麻将番型计算器(可选工具页)
+│       ├── calculator/       麻将算法(纯逻辑:解析/分解/番型/听牌)
+│       └── config.js         读 VITE_API_BASE(后端地址)
+└── server/                   后端(Express + Socket.io)
+    ├── server.js             入口:REST(auth/games) + Socket.io(房间/对局/set_config/kick)
+    ├── db.js                 存储层:有 DATABASE_URL 用 Postgres,否则内存降级
+    ├── rooms.js              房间管理(内存):创建/加入/离开/踢人/房主转移/配置
+    ├── schema.sql            Postgres 建表脚本
+    ├── routes/auth.js        注册/登录/me
     └── games/
-        ├── registry.js     游戏注册表
-        └── drawguess/      你画我猜模块(逻辑 + 词库)
+        ├── registry.js       游戏注册表
+        ├── drawguess/        你画我猜模块(逻辑 + 词库 + 房主配置)
+        └── werewolf/         狼人杀模块(角色/阶段状态机/信息隔离/胜负)
 ```
 
 ---
@@ -60,8 +76,10 @@ cd server && npm start          # → http://localhost:3001
 cd client && npm run dev        # → http://localhost:5173
 ```
 
-**试玩**:浏览器开 `http://localhost:5173` → 访客进入 → 创建房间;
-再开一个**无痕窗口**同地址 → 用房间码加入 → 房主开始 → 选词/画/猜。
+**试玩**:浏览器开 `http://localhost:5173` → 访客进入 → 选游戏创建房间;
+再开**无痕窗口**同地址 → 用房间码加入 → 房主开始。
+- 你画我猜:2 人起,选词/画/猜。
+- 狼人杀:4 人起(需多开几个无痕窗口),夜晚行动 → 白天投票。
 
 > 前端本地默认连 `http://localhost:3001`(见 `client/.env.development`)。
 
