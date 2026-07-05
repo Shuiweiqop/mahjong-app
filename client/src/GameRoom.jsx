@@ -49,6 +49,8 @@ export default function GameRoom({ socket, roomCode, me, onLeave }) {
     s.on('guessed', onGuessed);
     s.on('reveal', onReveal);
     s.on('game_over', onGameOver);
+    // 监听器就绪后主动拉一次当前状态(修复:错过创建/加入时首个 lobby 广播的竞态)
+    s.emit('sync');
     return () => {
       s.off('lobby', onLobby); s.off('game_state', onState); s.off('stroke', onStroke);
       s.off('clear', onClear); s.off('chat', onChat); s.off('guessed', onGuessed);
@@ -79,8 +81,8 @@ export default function GameRoom({ socket, roomCode, me, onLeave }) {
   const isHost = (lobby?.hostId || state?.hostId) === me.id;
   const joinUrl = `${window.location.origin}?room=${roomCode}`;
 
-  // ── 大厅(未开始) ──
-  if (lobby && !state) {
+  // ── 大厅(未开始):收到 lobby,且游戏尚未真正开始(无 state 或仍处 lobby 阶段) ──
+  if (lobby && (!state || state.phase === 'lobby')) {
     return (
       <div style={ui.wrap}>
         <TopBar roomCode={roomCode} onLeave={onLeave} />

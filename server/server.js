@@ -110,6 +110,20 @@ function ensureTimer(room) {
 io.on('connection', (socket) => {
   const user = socket.user;
 
+  // 前端进入房间界面、注册好监听器后主动拉一次当前状态,避免错过加入时的首个广播(竞态)
+  socket.on('sync', () => {
+    const room = roomsMgr.getRoom(socket.data.roomCode);
+    if (!room) return;
+    if (room.state) {
+      socket.emit('game_state', room.game.serializeStateFor(room.state, user.id));
+    } else {
+      socket.emit('lobby', {
+        code: room.code, gameId: room.gameId, hostId: room.hostId,
+        members: room.members, minPlayers: room.game.minPlayers, maxPlayers: room.game.maxPlayers,
+      });
+    }
+  });
+
   socket.on('create_room', ({ gameId }, cb) => {
     const { room, error } = roomsMgr.createRoom(gameId, user);
     if (error) return cb?.({ error });

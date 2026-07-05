@@ -65,6 +65,7 @@ export default function App() {
   if (screen === 'room' && room) {
     return (
       <GameRoom
+        key={room.code}
         socket={socketRef}
         roomCode={room.code}
         me={{ id: room.playerId, name: me.name }}
