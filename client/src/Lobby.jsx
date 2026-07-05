@@ -30,13 +30,19 @@ export default function Lobby({ me, connected, onCreate, onJoin, initialRoom, on
       <label style={ui.label}>选择游戏</label>
       {games.length === 0 && <p style={{ color: 'var(--muted)', fontSize: 13 }}>加载中…(确认后端已启动)</p>}
       {games.map((g) => (
-        <div key={g.id} style={{ ...ui.card, display: 'flex', alignItems: 'center' }}>
-          <div>
-            <div style={{ fontWeight: 800, fontSize: 16 }}>🎨 {g.displayName}</div>
-            <div style={{ fontSize: 12, color: 'var(--muted)' }}>{g.minPlayers}-{g.maxPlayers} 人 · 实时多人</div>
+        <div key={g.id} style={{ ...ui.card, padding: 0, overflow: 'hidden' }}>
+          {/* 游戏封面图(client/public/games/<id>.png);加载失败则隐藏,不影响卡片 */}
+          <img src={`/games/${g.id}.png`} alt={g.displayName}
+            style={{ width: '100%', aspectRatio: '16 / 9', objectFit: 'cover', display: 'block' }}
+            onError={(e) => { e.currentTarget.style.display = 'none'; }} />
+          <div style={{ display: 'flex', alignItems: 'center', padding: 14 }}>
+            <div>
+              <div style={{ fontWeight: 800, fontSize: 16 }}>{g.displayName}</div>
+              <div style={{ fontSize: 12, color: 'var(--muted)' }}>{g.minPlayers}-{g.maxPlayers} 人 · 实时多人</div>
+            </div>
+            <button style={{ ...ui.btnAccent, marginLeft: 'auto' }} disabled={!connected}
+              onClick={() => onCreate(g.id)}>创建房间</button>
           </div>
-          <button style={{ ...ui.btnAccent, marginLeft: 'auto' }} disabled={!connected}
-            onClick={() => onCreate(g.id)}>创建房间</button>
         </div>
       ))}
 
