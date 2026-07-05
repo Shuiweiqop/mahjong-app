@@ -60,16 +60,28 @@ const DrawCanvas = ({ canDraw, onStroke, onClear, strokeApiRef }) => {
   };
 
   const start = (e) => { if (!canDraw) return; drawing.current = true; last.current = pos(e); };
+  // 批量缓冲:本地立即画(流畅),笔画攒进 buffer 每 ~60ms 发一批,大幅减少消息数(降延迟)
+  const buffer = useRef([]);
+  const flushTimer = useRef(null);
+  const flush = () => {
+    if (buffer.current.length) { onStroke?.(buffer.current); buffer.current = []; }
+    flushTimer.current = null;
+  };
+  const queueStroke = (stroke) => {
+    buffer.current.push(stroke);
+    if (!flushTimer.current) flushTimer.current = setTimeout(flush, 60);
+  };
+
   const move = (e) => {
     if (!canDraw || !drawing.current) return;
     e.preventDefault();
     const cur = pos(e);
     const stroke = { from: last.current, to: cur, color: colorRef.current, size: sizeRef.current };
-    drawSeg(stroke.from, stroke.to, stroke.color, stroke.size);
-    onStroke?.(stroke);
+    drawSeg(stroke.from, stroke.to, stroke.color, stroke.size); // 本地即时绘制
+    queueStroke(stroke);                                         // 批量上报
     last.current = cur;
   };
-  const end = () => { drawing.current = false; last.current = null; };
+  const end = () => { drawing.current = false; last.current = null; flush(); }; // 抬笔立即冲刷
 
   return (
     <div>

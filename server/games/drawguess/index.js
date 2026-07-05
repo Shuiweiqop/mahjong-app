@@ -106,9 +106,10 @@ function applyAction(state, action, playerId) {
     case 'stroke': {
       if (state.phase !== 'draw') return { error: '当前不能作画' };
       if (playerId !== state.drawerId) return { error: '只有画手能画' };
-      state.strokes.push(action.stroke);
-      // 笔画广播由上层做(增量),这里只记录
-      events.push({ type: 'stroke', stroke: action.stroke, forOthers: true });
+      // 支持一批笔画(降延迟)或单笔(兼容)
+      const strokes = action.strokes || (action.stroke ? [action.stroke] : []);
+      for (const s of strokes) state.strokes.push(s);
+      events.push({ type: 'stroke', strokes, forOthers: true });
       return { state, events };
     }
 

@@ -58,9 +58,9 @@ function broadcastState(room, extraEvents = []) {
   // 广播非隔离的增量事件(笔画/聊天/猜中通知等)给全房间
   for (const ev of extraEvents) {
     if (ev.type === 'stroke') {
-      // 笔画只发给非画手(画手本地已画)
+      // 一批笔画只发给非画手(画手本地已画)
       socketsExcept(room, room.state.drawerId).forEach((sid) =>
-        io.to(sid).emit('stroke', ev.stroke)
+        io.to(sid).emit('stroke', ev.strokes)
       );
     } else if (ev.type === 'clear') {
       io.to(room.code).emit('clear');

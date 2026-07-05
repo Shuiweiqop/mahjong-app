@@ -34,7 +34,11 @@ export default function GameRoom({ socket, roomCode, me, onLeave }) {
       // 补画:收到全量 strokes 时重绘(中途加入/换轮)
       if (strokeApi.current) strokeApi.current.redrawAll(st.strokes || []);
     };
-    const onStroke = (stroke) => strokeApi.current?.applyRemoteStroke(stroke);
+    const onStroke = (strokes) => {
+      // 收到一批笔画(或兼容单笔),逐笔重绘
+      const arr = Array.isArray(strokes) ? strokes : [strokes];
+      arr.forEach((s) => strokeApi.current?.applyRemoteStroke(s));
+    };
     const onClear = () => strokeApi.current?.clear();
     const onChat = ({ playerId, text }) => addMsg(`${localName(playerId)}: ${text}`);
     const onGuessed = ({ playerId, points }) => addMsg(`✅ ${localName(playerId)} 猜中了! (+${points})`, 'success');
@@ -176,7 +180,7 @@ export default function GameRoom({ socket, roomCode, me, onLeave }) {
           ) : (
             <DrawCanvas
               canDraw={isDrawer && state?.phase === 'draw'}
-              onStroke={(stroke) => act({ type: 'stroke', stroke })}
+              onStroke={(strokes) => act({ type: 'stroke', strokes })}
               onClear={() => act({ type: 'clear' })}
               strokeApiRef={strokeApi}
             />
