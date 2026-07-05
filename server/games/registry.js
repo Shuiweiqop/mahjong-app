@@ -2,9 +2,11 @@
 // 新增游戏只需实现统一接口并在这里注册,平台其余部分无需改动。
 
 const drawguess = require('./drawguess');
+const werewolf = require('./werewolf');
 
 const games = {
   [drawguess.id]: drawguess,
+  [werewolf.id]: werewolf,
 };
 
 function getGame(id) {
