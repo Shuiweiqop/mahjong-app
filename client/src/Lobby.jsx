@@ -57,15 +57,20 @@ export default function Lobby({ me, connected, onCreate, onJoin, initialRoom, on
         </div>
       </div>
 
-      {/* 低调的工具入口(算法演示,非游戏门面) */}
+      {/* 低调的工具入口:右下角悬浮小麻将图标(算法演示,非游戏门面) */}
       {onCalc && (
-        <div style={{ textAlign: 'center', marginTop: 24 }}>
-          <button onClick={onCalc}
-            style={{ background: 'transparent', border: 'none', color: 'var(--muted)',
-              fontSize: 12, cursor: 'pointer', textDecoration: 'underline' }}>
-            🀄 麻将番型计算器(算法工具)
-          </button>
-        </div>
+        <button onClick={onCalc} title="麻将番型计算器 (算法工具)"
+          style={{
+            position: 'fixed', right: 20, bottom: 20, width: 48, height: 48,
+            borderRadius: '50%', border: '1px solid var(--border)',
+            background: 'var(--surface-2)', color: 'var(--text)', fontSize: 22,
+            cursor: 'pointer', display: 'grid', placeItems: 'center',
+            boxShadow: '0 4px 12px rgba(0,0,0,0.3)', opacity: 0.75, transition: 'opacity 0.2s',
+          }}
+          onMouseEnter={(e) => { e.currentTarget.style.opacity = '1'; }}
+          onMouseLeave={(e) => { e.currentTarget.style.opacity = '0.75'; }}>
+          🀄
+        </button>
       )}
     </div>
   );
