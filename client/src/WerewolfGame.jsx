@@ -1,3 +1,5 @@
+import { useState, useEffect } from 'react';
+import RoleReveal from './RoleReveal';
 import { ui } from './ui';
 
 // 狼人杀游戏界面(对局中)。
@@ -15,6 +17,13 @@ export default function WerewolfGame({ state, act, me }) {
   const role = ROLE_INFO[state.myRole] || ROLE_INFO.villager;
   const iAmAlive = state.alive;
   const alivePlayers = players.filter((p) => p.alive);
+
+  // 发身份序幕:拿到角色后显示一次(点"进入游戏"后不再显示)
+  const [revealDone, setRevealDone] = useState(false);
+  useEffect(() => { setRevealDone(false); }, []); // 每次进入本组件重置
+  if (state.myRole && !revealDone && state.phase !== 'ended') {
+    return <RoleReveal role={state.myRole} onDone={() => setRevealDone(true)} />;
+  }
 
   // 结束
   if (state.phase === 'ended') {
