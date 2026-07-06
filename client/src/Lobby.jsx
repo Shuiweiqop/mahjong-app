@@ -33,7 +33,7 @@ export default function Lobby({ me, connected, onCreate, onJoin, initialRoom, on
         <div key={g.id} style={{ ...ui.card, padding: 0, overflow: 'hidden' }}>
           {/* 游戏封面图(client/public/games/<id>.png);加载失败则隐藏,不影响卡片 */}
           <img src={`/games/${g.id}.png`} alt={g.displayName}
-            style={{ width: '100%', aspectRatio: '16 / 9', objectFit: 'cover', display: 'block' }}
+            style={{ width: '100%', aspectRatio: '16 / 9', objectFit: 'cover', objectPosition: 'center', display: 'block' }}
             onError={(e) => { e.currentTarget.style.display = 'none'; }} />
           <div style={{ display: 'flex', alignItems: 'center', padding: 14 }}>
             <div>
