@@ -41,9 +41,9 @@ export default function RoleReveal({ role, onDone }) {
               ...cardBackStyle(backImgOk), position: 'absolute', inset: 0,
               animation: `shuffle 0.5s ease-in-out ${i * 0.05}s infinite alternate`,
             }}>
-              {!backImgOk && <div style={backFallback}>🀄</div>}
-              <img src="/games/cards/card-back.png" alt="" style={imgStyle}
-                onError={() => setBackImgOk(false)} />
+              {backImgOk
+                ? <img src="/games/cards/card-back.png" alt="" style={imgStyle} onError={() => setBackImgOk(false)} />
+                : <div style={backFallback}>🌙</div>}
             </div>
           ))}
           <p style={hint}>洗牌中…</p>
@@ -60,8 +60,9 @@ export default function RoleReveal({ role, onDone }) {
             }}>
               {/* 背面 */}
               <div style={{ ...cardBackStyle(backImgOk), position: 'absolute', inset: 0, backfaceVisibility: 'hidden' }}>
-                {!backImgOk && <div style={backFallback}>🀄</div>}
-                <img src="/games/cards/card-back.png" alt="" style={imgStyle} onError={() => setBackImgOk(false)} />
+                {backImgOk
+                  ? <img src="/games/cards/card-back.png" alt="" style={imgStyle} onError={() => setBackImgOk(false)} />
+                  : <div style={backFallback}>🌙</div>}
               </div>
               {/* 正面(角色) */}
               <div style={{
