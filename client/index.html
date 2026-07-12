@@ -2,10 +2,20 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>Playground · 多人游戏平台</title>
     <meta name="theme-color" content="#6c7dfc" />
-    <meta name="description" content="多人实时游戏平台 —— 你画我猜等" />
+    <meta name="description" content="多人实时游戏平台 —— 你画我猜、狼人杀等" />
+
+    <!-- 安装为应用(PWA):图标 + 主屏元数据 -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="manifest" href="/manifest.json" />
+
+    <!-- iOS「添加到主屏」全屏 -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Playground" />
+    <link rel="apple-touch-icon" href="/icon-192.png" />
   </head>
   <body>
     <div id="root"></div>
