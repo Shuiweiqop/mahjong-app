@@ -254,10 +254,10 @@ function serializeStateFor(s, playerId) {
     hostId: s.hostId,
     deadline: s.deadline,               // 当前阶段截止时间戳,前端据此显示倒计时
   };
-  // 狼人:能看到同伴狼人
+  // 狼人:能看到同伴狼人(不含自己;单狼局则为空数组)
   if (myRole === ROLE.WOLF) {
     view.wolfTeammates = s.players
-      .filter((p) => s.roles[p.id] === ROLE.WOLF)
+      .filter((p) => s.roles[p.id] === ROLE.WOLF && p.id !== playerId)
       .map((p) => p.id);
   }
   // 预言家:能看到自己的查验结果

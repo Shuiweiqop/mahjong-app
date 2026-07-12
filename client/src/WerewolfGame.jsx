@@ -12,19 +12,26 @@ const ROLE_INFO = {
 };
 
 // 倒计时:读 state.deadline(ms 时间戳),每 500ms 触发一次重渲染,剩余秒数由 deadline 现算。
-// 不把秒数存进 state —— 避免在 effect 里同步 setState。
+// 不把秒数存进 state —— 避免在 effect 里同步 setState。剩 10s 内变红 + 脉动,制造紧迫感。
 function Countdown({ deadline }) {
   const [, forceTick] = useReducer((n) => n + 1, 0);
+  const active = deadline != null;
   useEffect(() => {
+    if (!active) return;                     // 无 deadline 时不空转
     const t = setInterval(forceTick, 500);
     return () => clearInterval(t);
-  }, []);
-  if (deadline == null) return null;
+  }, [active]);
+  if (!active) return null;
   const left = remain(deadline);
   const danger = left <= 10;
   return (
-    <span style={{ ...ui.badge, background: danger ? 'var(--danger)' : 'var(--surface-2)',
-      color: danger ? '#fff' : 'var(--muted)' }}>
+    <span style={{
+      ...ui.badge,
+      fontSize: 15, fontWeight: 800, padding: '6px 14px',
+      background: danger ? 'var(--danger)' : 'var(--surface-2)',
+      color: danger ? '#fff' : 'var(--text)',
+      animation: danger ? 'pulse 1s ease-in-out infinite' : 'none',
+    }}>
       ⏱ {left}s
     </span>
   );
@@ -97,7 +104,9 @@ export default function WerewolfGame({ state, act, me }) {
             <div style={{ fontSize: 13, color: 'var(--muted)' }}>{role.desc}</div>
             {state.myRole === 'wolf' && state.wolfTeammates && (
               <div style={{ fontSize: 13, marginTop: 6, color: 'var(--danger)' }}>
-                🐺 狼队友:{state.wolfTeammates.map(nameOf).join('、')}
+                {state.wolfTeammates.length > 0
+                  ? `🐺 狼队友:${state.wolfTeammates.map(nameOf).join('、')}`
+                  : '🐺 你是唯一的狼'}
               </div>
             )}
             {state.myRole === 'seer' && state.seerResults && Object.keys(state.seerResults).length > 0 && (
