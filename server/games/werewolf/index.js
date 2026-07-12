@@ -6,10 +6,17 @@
 //   serializeStateFor(state, playerId)   -> 分角色视图(狼人见同伴、预言家见查验、平民见公开)
 //   isGameOver(state)                    -> { over, winner } | false
 //
-// 阶段状态机: lobby → night → day → vote → (循环) → ended
+// 阶段状态机: lobby → night → day(讨论+投票同阶段) → (循环) → ended
+// 每阶段有 deadline,服务端计时器(tick)到点兜底推进,避免掉线/发呆死锁。
 // 纯逻辑,不碰 socket/db,便于测试。
 
 const ROLE = { WOLF: 'wolf', SEER: 'seer', VILLAGER: 'villager' };
+
+// 各阶段超时(秒)。到点由服务端计时器(tick)兜底推进,避免有人掉线/发呆时死锁。
+const NIGHT_SECONDS = 40;   // 夜晚:狼人选刀 + 预言家查验
+const DAY_SECONDS = 60;     // 白天:讨论 + 投票放逐(时间内可随时改票,到点结算)
+
+const now = () => Date.now();
 
 // 按人数决定狼人数量
 function wolfCount(n) {
@@ -46,7 +53,8 @@ function createInitialState(players) {
     round: 0,
     nightActions: {},                     // 本夜:{ wolfTargetVotes:{voterId:targetId}, seerCheck:{seerId,targetId} }
     seerResults: {},                      // { seerId: { [targetId]: 'wolf'|'good' } } 累积查验结果
-    votes: {},                            // 白天投票:{ voterId: targetId }
+    votes: {},                            // 白天投票:{ voterId: targetId|null }(可改票)
+    deadline: null,                       // 当前阶段截止时间戳(ms);到点由 tick 兜底推进
     log: [],                              // 公开事件日志
     lastNightVictim: null,
     lastVotedOut: null,
@@ -57,12 +65,20 @@ function createInitialState(players) {
 
 const aliveIds = (s) => s.players.map((p) => p.id).filter((id) => s.alive[id]);
 const aliveWolves = (s) => aliveIds(s).filter((id) => s.roles[id] === ROLE.WOLF);
-const aliveGood = (s) => aliveIds(s).filter((id) => s.roles[id] !== ROLE.WOLF);
+const aliveVillagers = (s) => aliveIds(s).filter((id) => s.roles[id] === ROLE.VILLAGER);
+const aliveGods = (s) => aliveIds(s).filter((id) => s.roles[id] === ROLE.SEER); // 神职:目前只有预言家
 
-// 检查胜负;有结果则置 ended
+// 检查胜负;有结果则置 ended。屠边规则:
+//   好人胜 —— 狼人全部出局。
+//   狼人胜 —— 屠平民边(所有平民出局)或屠神边(所有神职出局)。
+// 注:若开局某一边人数为 0(如小局无平民),该边不作为屠边条件,避免开局即判狼胜。
 function checkWin(s) {
   if (aliveWolves(s).length === 0) { s.winner = 'good'; s.phase = 'ended'; return true; }
-  if (aliveWolves(s).length >= aliveGood(s).length) { s.winner = 'wolf'; s.phase = 'ended'; return true; }
+  const hadVillagers = Object.values(s.roles).some((r) => r === ROLE.VILLAGER);
+  const hadGods = Object.values(s.roles).some((r) => r === ROLE.SEER);
+  const villagersWiped = hadVillagers && aliveVillagers(s).length === 0;
+  const godsWiped = hadGods && aliveGods(s).length === 0;
+  if (villagersWiped || godsWiped) { s.winner = 'wolf'; s.phase = 'ended'; return true; }
   return false;
 }
 
@@ -71,7 +87,17 @@ function enterNight(s) {
   s.round += 1;
   s.phase = 'night';
   s.nightActions = { wolfTargetVotes: {}, seerCheck: null };
+  s.deadline = now() + NIGHT_SECONDS * 1000;
   s.log.push({ type: 'phase', phase: 'night', round: s.round });
+}
+
+// 进入白天(讨论 + 投票同阶段):一进来即开放投票并倒计时。
+// 玩家可在时间内随时改票;到点(tick)或全员投完即结算。
+function enterDay(s) {
+  s.phase = 'day';
+  s.votes = {};
+  s.deadline = now() + DAY_SECONDS * 1000;
+  s.log.push({ type: 'phase', phase: 'day', round: s.round });
 }
 
 // 结算夜晚 → 进入白天
@@ -86,10 +112,8 @@ function resolveNight(s) {
   if (victim && s.alive[victim]) { s.alive[victim] = false; s.lastNightVictim = victim; }
   else s.lastNightVictim = null;
 
-  s.phase = 'day';
-  s.votes = {};
   s.log.push({ type: 'night_result', victim: s.lastNightVictim });
-  checkWin(s);
+  if (!checkWin(s)) enterDay(s);
 }
 
 // 结算白天投票 → 进入下一夜
@@ -131,7 +155,7 @@ function applyAction(s, action, playerId) {
       if (!s.alive[action.target]) return { error: '目标无效' };
       s.nightActions.wolfTargetVotes[playerId] = action.target;
       // 所有存活狼人都投了 + 预言家查验完(若有存活预言家)→ 结算夜晚
-      maybeResolveNight(s, events);
+      maybeResolveNight(s);
       return { state: s, events };
     }
 
@@ -143,18 +167,31 @@ function applyAction(s, action, playerId) {
       s.seerResults[playerId] = s.seerResults[playerId] || {};
       s.seerResults[playerId][action.target] = result;
       s.nightActions.seerCheck = { seerId: playerId, targetId: action.target };
-      maybeResolveNight(s, events);
+      maybeResolveNight(s);
       return { state: s, events };
     }
 
+    // 白天投票(讨论与投票同阶段):时间内可随时改票,target 为 null 即弃票。
     case 'vote': {
-      if (s.phase !== 'day' && s.phase !== 'vote') return { error: '非投票阶段' };
+      if (s.phase !== 'day') return { error: '非白天投票阶段' };
       if (!isAlive) return { error: '死亡玩家不能投票' };
       if (action.target && !s.alive[action.target]) return { error: '目标无效' };
-      s.phase = 'vote';
       s.votes[playerId] = action.target || null;
-      // 所有存活玩家都投了 → 结算
+      // 所有存活玩家都投了 → 提前结算(不必等倒计时)
       if (aliveIds(s).every((id) => id in s.votes)) resolveVote(s);
+      return { state: s, events };
+    }
+
+    // 服务端计时器驱动:当前阶段到点则兜底推进(避免掉线/发呆导致死锁)
+    case 'tick': {
+      if (s.phase === 'ended' || !s.deadline || now() < s.deadline) return { state: s, events };
+      if (s.phase === 'night') {
+        // 未行动的狼人 → 空刀(不补随机目标,平安夜);预言家未查 → 跳过
+        resolveNight(s);
+      } else if (s.phase === 'day') {
+        // 到点结算:未投的算弃票,平票无人出局
+        resolveVote(s);
+      }
       return { state: s, events };
     }
 
@@ -164,7 +201,7 @@ function applyAction(s, action, playerId) {
 }
 
 // 夜晚是否可结算:所有存活狼人已投 + (无存活预言家 或 预言家已查验)
-function maybeResolveNight(s, events) {
+function maybeResolveNight(s) {
   const wolvesDone = aliveWolves(s).every((id) => id in s.nightActions.wolfTargetVotes);
   const seers = aliveIds(s).filter((id) => s.roles[id] === ROLE.SEER);
   const seerDone = seers.length === 0 || s.nightActions.seerCheck != null;
@@ -185,6 +222,7 @@ function serializeStateFor(s, playerId) {
     lastNightVictim: s.lastNightVictim,
     lastVotedOut: s.lastVotedOut,
     hostId: s.hostId,
+    deadline: s.deadline,               // 当前阶段截止时间戳,前端据此显示倒计时
   };
   // 狼人:能看到同伴狼人
   if (myRole === ROLE.WOLF) {
@@ -196,8 +234,17 @@ function serializeStateFor(s, playerId) {
   if (myRole === ROLE.SEER) {
     view.seerResults = s.seerResults[playerId] || {};
   }
-  // 投票阶段:公开当前票型(谁投了谁),增加讨论信息
-  if (s.phase === 'vote') view.votes = s.votes;
+  // 夜晚:告诉本人是否已行动(狼人已投刀 / 预言家已查验),前端显示等待态
+  if (s.phase === 'night') {
+    if (myRole === ROLE.WOLF) view.iActed = playerId in (s.nightActions.wolfTargetVotes || {});
+    else if (myRole === ROLE.SEER) view.iActed = s.nightActions.seerCheck != null;
+  }
+  // 白天(讨论+投票):公开当前票型(谁投了谁)供讨论;并标记本人当前票与是否已投
+  if (s.phase === 'day') {
+    view.votes = s.votes;
+    view.iVoted = playerId in s.votes;
+    view.myVote = playerId in s.votes ? s.votes[playerId] : undefined;
+  }
   // 结束:公开所有身份
   if (s.phase === 'ended') {
     view.winner = s.winner;

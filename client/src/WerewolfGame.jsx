@@ -1,15 +1,35 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useReducer } from 'react';
 import RoleReveal from './RoleReveal';
 import { ui } from './ui';
 
 // 狼人杀游戏界面(对局中)。
-// props: state(分角色视图), act(action=>void), me{id,name}, messages
-// state.phase: night | day | vote | ended
+// props: state(分角色视图), act(action=>void), me{id,name}
+// state.phase: night | day | ended  (白天=讨论与投票同阶段,有倒计时)
 const ROLE_INFO = {
   wolf: { emoji: '🐺', name: '狼人', desc: '夜晚与同伴一起猎杀一名玩家' },
   seer: { emoji: '🔮', name: '预言家', desc: '每晚查验一名玩家的身份' },
   villager: { emoji: '👤', name: '平民', desc: '白天找出并投票放逐狼人' },
 };
+
+// 倒计时:读 state.deadline(ms 时间戳),每 500ms 触发一次重渲染,剩余秒数由 deadline 现算。
+// 不把秒数存进 state —— 避免在 effect 里同步 setState。
+function Countdown({ deadline }) {
+  const [, forceTick] = useReducer((n) => n + 1, 0);
+  useEffect(() => {
+    const t = setInterval(forceTick, 500);
+    return () => clearInterval(t);
+  }, []);
+  if (deadline == null) return null;
+  const left = remain(deadline);
+  const danger = left <= 10;
+  return (
+    <span style={{ ...ui.badge, background: danger ? 'var(--danger)' : 'var(--surface-2)',
+      color: danger ? '#fff' : 'var(--muted)' }}>
+      ⏱ {left}s
+    </span>
+  );
+}
+const remain = (deadline) => deadline == null ? 0 : Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
 
 export default function WerewolfGame({ state, act, me }) {
   const players = state.players || [];
@@ -18,9 +38,9 @@ export default function WerewolfGame({ state, act, me }) {
   const iAmAlive = state.alive;
   const alivePlayers = players.filter((p) => p.alive);
 
-  // 发身份序幕:拿到角色后显示一次(点"进入游戏"后不再显示)
+  // 发身份序幕:拿到角色后显示一次(点"进入游戏"后不再显示)。
+  // 初始 false 即"未看过";组件挂载时本就是 false,无需 effect 重置。
   const [revealDone, setRevealDone] = useState(false);
-  useEffect(() => { setRevealDone(false); }, []); // 每次进入本组件重置
   if (state.myRole && !revealDone && state.phase !== 'ended') {
     return <RoleReveal role={state.myRole} onDone={() => setRevealDone(true)} />;
   }
@@ -47,7 +67,7 @@ export default function WerewolfGame({ state, act, me }) {
     );
   }
 
-  const phaseLabel = { night: '🌙 夜晚', day: '☀️ 白天讨论', vote: '🗳️ 投票放逐' }[state.phase] || state.phase;
+  const phaseLabel = { night: '🌙 夜晚', day: '☀️ 白天讨论 · 投票' }[state.phase] || state.phase;
 
   return (
     <div>
@@ -55,6 +75,7 @@ export default function WerewolfGame({ state, act, me }) {
       <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 12, flexWrap: 'wrap' }}>
         <span style={ui.badge}>第 {state.round} 天</span>
         <span style={ui.badge}>{phaseLabel}</span>
+        <Countdown deadline={state.deadline} />
         <span style={{ ...ui.badge, background: iAmAlive ? 'var(--surface-2)' : 'var(--danger)' }}>
           {role.emoji} 你是{role.name}{iAmAlive ? '' : ' · 已出局'}
         </span>
@@ -86,28 +107,7 @@ export default function WerewolfGame({ state, act, me }) {
           ) : state.phase === 'night' ? (
             <NightActions state={state} act={act} me={me} alivePlayers={alivePlayers} />
           ) : state.phase === 'day' ? (
-            <div style={{ textAlign: 'center' }}>
-              <p style={{ marginBottom: 10 }}>
-                {state.lastNightVictim
-                  ? `昨晚 ${nameOf(state.lastNightVictim)} 遇害了` : '昨晚是平安夜,无人死亡'}
-              </p>
-              <p style={{ color: 'var(--muted)', fontSize: 13, marginBottom: 12 }}>讨论一下,谁是狼人?</p>
-              <button style={ui.btnAccent} onClick={() => act({ type: 'vote', target: null })}>
-                进入投票 →
-              </button>
-            </div>
-          ) : state.phase === 'vote' ? (
-            <div>
-              <p style={{ marginBottom: 10, fontWeight: 700, textAlign: 'center' }}>投票放逐一名玩家</p>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                {alivePlayers.filter((p) => p.id !== me.id).map((p) => (
-                  <button key={p.id} style={{ ...ui.btnGhost }}
-                    onClick={() => act({ type: 'vote', target: p.id })}>投 {p.name}</button>
-                ))}
-                <button style={{ ...ui.btnGhost, color: 'var(--muted)' }}
-                  onClick={() => act({ type: 'vote', target: null })}>弃票</button>
-              </div>
-            </div>
+            <DayVote state={state} act={act} me={me} alivePlayers={alivePlayers} nameOf={nameOf} />
           ) : null}
         </div>
 
@@ -126,9 +126,11 @@ export default function WerewolfGame({ state, act, me }) {
   );
 }
 
-// 夜晚行动:狼人选刀、预言家查验
+// 夜晚行动:狼人选刀、预言家查验。行动后显示等待态(仍可改选,等所有人行动完或超时天亮)。
 function NightActions({ state, act, me, alivePlayers }) {
   const targets = alivePlayers.filter((p) => p.id !== me.id);
+  const acted = state.iActed;
+
   if (state.myRole === 'wolf') {
     return (
       <div>
@@ -139,6 +141,7 @@ function NightActions({ state, act, me, alivePlayers }) {
               onClick={() => act({ type: 'wolf_kill', target: p.id })}>猎杀 {p.name}</button>
           ))}
         </div>
+        {acted && <WaitHint text="✓ 已出刀,等待其他人行动…" />}
       </div>
     );
   }
@@ -152,8 +155,49 @@ function NightActions({ state, act, me, alivePlayers }) {
               onClick={() => act({ type: 'seer_check', target: p.id })}>查验 {p.name}</button>
           ))}
         </div>
+        {acted && <WaitHint text="✓ 已查验,等待其他人行动…" />}
       </div>
     );
   }
   return <p style={{ color: 'var(--muted)', textAlign: 'center' }}>🌙 天黑请闭眼,等待天亮…</p>;
+}
+
+// 白天:讨论 + 投票(同阶段)。列表可点,随时改票;高亮当前票;倒计时到点由服务端结算。
+function DayVote({ state, act, me, alivePlayers, nameOf }) {
+  const myVote = state.myVote;               // 当前票:玩家 id、或 null(弃票)、或 undefined(未投)
+  const voted = state.iVoted;
+  const candidates = alivePlayers.filter((p) => p.id !== me.id);
+  return (
+    <div>
+      <p style={{ marginBottom: 6, textAlign: 'center' }}>
+        {state.lastNightVictim
+          ? `昨晚 ${nameOf(state.lastNightVictim)} 遇害了` : '昨晚是平安夜,无人死亡'}
+      </p>
+      <p style={{ color: 'var(--muted)', fontSize: 13, marginBottom: 12, textAlign: 'center' }}>
+        讨论并投票放逐一名玩家 · 时间内可改票 · 到点结算(平票无人出局)
+      </p>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {candidates.map((p) => {
+          const picked = myVote === p.id;
+          return (
+            <button key={p.id}
+              style={{ ...ui.btnGhost, ...(picked ? { borderColor: 'var(--accent)', color: 'var(--accent)', fontWeight: 800 } : {}) }}
+              onClick={() => act({ type: 'vote', target: p.id })}>
+              {picked ? '✓ ' : ''}投 {p.name}
+            </button>
+          );
+        })}
+        <button
+          style={{ ...ui.btnGhost, color: 'var(--muted)', ...(voted && myVote == null ? { borderColor: 'var(--accent)' } : {}) }}
+          onClick={() => act({ type: 'vote', target: null })}>
+          {voted && myVote == null ? '✓ ' : ''}弃票
+        </button>
+      </div>
+      {!voted && <WaitHint text="你还没投票 — 到点未投将视为弃票" />}
+    </div>
+  );
+}
+
+function WaitHint({ text }) {
+  return <p style={{ color: 'var(--muted)', fontSize: 13, textAlign: 'center', marginTop: 12 }}>{text}</p>;
 }
