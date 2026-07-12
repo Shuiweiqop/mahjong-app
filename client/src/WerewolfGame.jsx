@@ -88,8 +88,8 @@ export default function WerewolfGame({ state, act, me }) {
         </span>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) 220px', gap: 14 }}>
-        {/* 左:主区(角色行动 / 讨论 / 投票) */}
+      <div className="game-layout" style={{ '--side': '220px' }}>
+        {/* 左:主区(角色行动 / 讨论 / 投票);窄屏下降级为单栏,侧栏落到下方 */}
         <div style={ui.card}>
           {/* 我的身份卡 */}
           <div style={{ marginBottom: 14, padding: 12, borderRadius: 10, background: 'var(--surface-2)' }}>

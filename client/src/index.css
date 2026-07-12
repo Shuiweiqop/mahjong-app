@@ -35,6 +35,19 @@ input {
   body { font-size: 14px; }
 }
 
+/* 对局双栏布局:宽屏「主区 + 固定侧栏」,窄屏(手机)降级为单栏竖排。
+   狼人杀 / 你画我猜共用。--side 为侧栏宽,由各组件用内联 style 变量传入。 */
+.game-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--side, 220px);
+  gap: 14px;
+}
+@media (max-width: 640px) {
+  .game-layout {
+    grid-template-columns: 1fr;   /* 窄屏:侧栏落到主区下方,各自占满整行 */
+  }
+}
+
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.3; }

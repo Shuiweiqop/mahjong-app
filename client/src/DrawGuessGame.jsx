@@ -93,7 +93,7 @@ export default function DrawGuessGame({ state, act, me, socket, onLeave }) {
         <span style={{ marginLeft: 'auto', fontSize: 20, letterSpacing: 4, fontWeight: 800, color: 'var(--text)' }}>{wordHint()}</span>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) 240px', gap: 14 }}>
+      <div className="game-layout" style={{ '--side': '240px' }}>
         <div>
           {state?.phase === 'pick' && isDrawer ? (
             <div style={{ ...ui.card, textAlign: 'center' }}>
