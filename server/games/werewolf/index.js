@@ -6,13 +6,14 @@
 //   serializeStateFor(state, playerId)   -> 分角色视图(狼人见同伴、预言家见查验、平民见公开)
 //   isGameOver(state)                    -> { over, winner } | false
 //
-// 阶段状态机: lobby → night → day(讨论+投票同阶段) → (循环) → ended
-// 每阶段有 deadline,服务端计时器(tick)到点兜底推进,避免掉线/发呆死锁。
+// 阶段状态机: lobby → reveal(身份揭晓) → night → day(讨论+投票同阶段) → (循环) → ended
+// reveal 阶段不计时(等所有人点"进入游戏"),带宽限超时兜底;其余阶段到点由 tick 推进,避免死锁。
 // 纯逻辑,不碰 socket/db,便于测试。
 
 const ROLE = { WOLF: 'wolf', SEER: 'seer', VILLAGER: 'villager' };
 
 // 各阶段超时(秒)。到点由服务端计时器(tick)兜底推进,避免有人掉线/发呆时死锁。
+const REVEAL_SECONDS = 30;  // 身份揭晓:等所有人点"进入游戏";此宽限超时只为防有人不点而卡住
 const NIGHT_SECONDS = 40;   // 夜晚:狼人选刀 + 预言家查验
 const DAY_SECONDS = 60;     // 白天:讨论 + 投票放逐(时间内可随时改票,到点结算)
 
@@ -54,6 +55,7 @@ function createInitialState(players) {
     nightActions: {},                     // 本夜:{ wolfTargetVotes:{voterId:targetId}, seerCheck:{seerId,targetId} }
     seerResults: {},                      // { seerId: { [targetId]: 'wolf'|'good' } } 累积查验结果
     votes: {},                            // 白天投票:{ voterId: targetId|null }(可改票)
+    ready: {},                            // 身份揭晓:已点"进入游戏"的玩家 { playerId: true }
     deadline: null,                       // 当前阶段截止时间戳(ms);到点由 tick 兜底推进
     log: [],                              // 公开事件日志
     lastNightVictim: null,
@@ -80,6 +82,13 @@ function checkWin(s) {
   const godsWiped = hadGods && aliveGods(s).length === 0;
   if (villagersWiped || godsWiped) { s.winner = 'wolf'; s.phase = 'ended'; return true; }
   return false;
+}
+
+// 进入身份揭晓(不计时,等所有存活玩家点"进入游戏";带宽限超时防有人不点卡住)
+function enterReveal(s) {
+  s.phase = 'reveal';
+  s.ready = {};
+  s.deadline = now() + REVEAL_SECONDS * 1000;
 }
 
 // 进入夜晚
@@ -145,7 +154,15 @@ function applyAction(s, action, playerId) {
       if (playerId !== s.hostId) return { error: '只有房主能开始' };
       if (s.phase !== 'lobby') return { error: '游戏已开始' };
       if (s.players.length < 4) return { error: '狼人杀至少需要 4 人' };
-      enterNight(s);
+      enterReveal(s);   // 先进身份揭晓,等所有人点"进入游戏"再进夜晚(夜晚才起计时)
+      return { state: s, events };
+    }
+
+    // 身份揭晓:玩家点"进入游戏"表示已看完身份。所有存活玩家就绪(或宽限超时)→ 进夜晚。
+    case 'ready': {
+      if (s.phase !== 'reveal') return { state: s, events }; // 幂等:非揭晓阶段忽略
+      s.ready[playerId] = true;
+      if (aliveIds(s).every((id) => s.ready[id])) enterNight(s);
       return { state: s, events };
     }
 
@@ -172,20 +189,22 @@ function applyAction(s, action, playerId) {
     }
 
     // 白天投票(讨论与投票同阶段):时间内可随时改票,target 为 null 即弃票。
+    // 到倒计时结束才结算(见 tick),不提前结算 —— 保证承诺的"时间内可改票"始终成立。
     case 'vote': {
       if (s.phase !== 'day') return { error: '非白天投票阶段' };
       if (!isAlive) return { error: '死亡玩家不能投票' };
       if (action.target && !s.alive[action.target]) return { error: '目标无效' };
       s.votes[playerId] = action.target || null;
-      // 所有存活玩家都投了 → 提前结算(不必等倒计时)
-      if (aliveIds(s).every((id) => id in s.votes)) resolveVote(s);
       return { state: s, events };
     }
 
     // 服务端计时器驱动:当前阶段到点则兜底推进(避免掉线/发呆导致死锁)
     case 'tick': {
       if (s.phase === 'ended' || !s.deadline || now() < s.deadline) return { state: s, events };
-      if (s.phase === 'night') {
+      if (s.phase === 'reveal') {
+        // 宽限超时:仍有人没点"进入游戏",也强制进夜晚,防止卡在揭晓
+        enterNight(s);
+      } else if (s.phase === 'night') {
         // 未行动的狼人 → 空刀(不补随机目标,平安夜);预言家未查 → 跳过
         resolveNight(s);
       } else if (s.phase === 'day') {
@@ -233,6 +252,12 @@ function serializeStateFor(s, playerId) {
   // 预言家:能看到自己的查验结果
   if (myRole === ROLE.SEER) {
     view.seerResults = s.seerResults[playerId] || {};
+  }
+  // 身份揭晓:本人是否已就绪 + 就绪进度(等其他人点"进入游戏")
+  if (s.phase === 'reveal') {
+    view.iReady = !!s.ready[playerId];
+    view.readyCount = aliveIds(s).filter((id) => s.ready[id]).length;
+    view.readyTotal = aliveIds(s).length;
   }
   // 夜晚:告诉本人是否已行动(狼人已投刀 / 预言家已查验),前端显示等待态
   if (s.phase === 'night') {

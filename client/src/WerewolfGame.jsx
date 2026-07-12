@@ -1,4 +1,4 @@
-import { useState, useEffect, useReducer } from 'react';
+import { useEffect, useReducer } from 'react';
 import RoleReveal from './RoleReveal';
 import { ui } from './ui';
 
@@ -38,11 +38,18 @@ export default function WerewolfGame({ state, act, me }) {
   const iAmAlive = state.alive;
   const alivePlayers = players.filter((p) => p.alive);
 
-  // 发身份序幕:拿到角色后显示一次(点"进入游戏"后不再显示)。
-  // 初始 false 即"未看过";组件挂载时本就是 false,无需 effect 重置。
-  const [revealDone, setRevealDone] = useState(false);
-  if (state.myRole && !revealDone && state.phase !== 'ended') {
-    return <RoleReveal role={state.myRole} onDone={() => setRevealDone(true)} />;
+  // 身份序幕:仅在服务端 reveal 阶段显示(此阶段夜晚尚未计时)。
+  // 点"进入游戏"→ 发 ready;等所有存活玩家就绪(或宽限超时),服务端推进到 night,序幕自然消失。
+  if (state.phase === 'reveal' && state.myRole) {
+    return (
+      <RoleReveal
+        role={state.myRole}
+        ready={state.iReady}
+        readyCount={state.readyCount}
+        readyTotal={state.readyTotal}
+        onDone={() => act({ type: 'ready' })}
+      />
+    );
   }
 
   // 结束
