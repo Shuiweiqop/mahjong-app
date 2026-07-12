@@ -2,7 +2,8 @@ import { useState, useEffect } from 'react';
 import { ui } from './ui';
 
 // 发身份序幕:洗牌 → 一张牌飞到面前 → 点击翻开露出角色 → 进入游戏。
-// props: role('wolf'|'seer'|'villager'), onDone()
+// props: role('wolf'|'seer'|'villager'), onDone(), ready(本人已就绪), readyCount/readyTotal(就绪进度)
+// 点"进入游戏"后 onDone() 通知服务端就绪;等所有人就绪后由父组件切走本序幕。
 // 牌面用图片 client/public/games/cards/card-<role>.png,加载失败回退 emoji+文字。
 const ROLE_META = {
   wolf: { emoji: '🐺', name: '狼人', color: '#c0392b', desc: '夜晚与同伴猎杀一名玩家' },
@@ -13,7 +14,7 @@ const ROLE_META = {
 const CARD_W = 200;
 const CARD_H = 300;
 
-export default function RoleReveal({ role, onDone }) {
+export default function RoleReveal({ role, onDone, ready = false, readyCount, readyTotal }) {
   const meta = ROLE_META[role] || ROLE_META.villager;
   // 阶段: shuffle(洗牌) → deal(飞牌就位) → flipped(已翻开)
   const [stage, setStage] = useState('shuffle');
@@ -91,7 +92,14 @@ export default function RoleReveal({ role, onDone }) {
                 你是 {meta.emoji} {meta.name}
               </div>
               <div style={{ color: 'var(--muted)', fontSize: 14, marginBottom: 18 }}>{meta.desc}</div>
-              <button style={ui.btnAccent} onClick={onDone}>进入游戏</button>
+              {ready ? (
+                <p style={{ color: 'var(--muted)', fontSize: 14 }}>
+                  ✓ 已准备,等待其他玩家…
+                  {readyTotal ? ` (${readyCount}/${readyTotal})` : ''}
+                </p>
+              ) : (
+                <button style={ui.btnAccent} onClick={onDone}>进入游戏</button>
+              )}
             </div>
           )}
         </div>
