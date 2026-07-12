@@ -12,6 +12,16 @@
 
 const ROLE = { WOLF: 'wolf', SEER: 'seer', VILLAGER: 'villager' };
 
+// 角色 → 阵营。屠边胜利按阵营判定(狼屠光"平民边"或"神职边"即胜)。
+// 新增角色只需在此登记阵营,checkWin 无需改动(避免在多处枚举具体角色)。
+const FACTION = { wolf: 'wolf', god: 'god', villager: 'villager' };
+const ROLE_FACTION = {
+  [ROLE.WOLF]: FACTION.wolf,
+  [ROLE.SEER]: FACTION.god,       // 预言家属神职;女巫/猎人等未来神职同样填 god
+  [ROLE.VILLAGER]: FACTION.villager,
+};
+const factionOf = (role) => ROLE_FACTION[role];
+
 // 各阶段超时(秒)。到点由服务端计时器(tick)兜底推进,避免有人掉线/发呆时死锁。
 const REVEAL_SECONDS = 30;  // 身份揭晓:等所有人点"进入游戏";此宽限超时只为防有人不点而卡住
 const NIGHT_SECONDS = 40;   // 夜晚:狼人选刀 + 预言家查验
@@ -67,20 +77,21 @@ function createInitialState(players) {
 
 const aliveIds = (s) => s.players.map((p) => p.id).filter((id) => s.alive[id]);
 const aliveWolves = (s) => aliveIds(s).filter((id) => s.roles[id] === ROLE.WOLF);
-const aliveVillagers = (s) => aliveIds(s).filter((id) => s.roles[id] === ROLE.VILLAGER);
-const aliveGods = (s) => aliveIds(s).filter((id) => s.roles[id] === ROLE.SEER); // 神职:目前只有预言家
+// 某阵营开局是否存在,以及是否已被全屠(存活为 0)。屠边只对开局存在的阵营成立,
+// 避免小局某边人数为 0 时开局即判狼胜。
+const factionExists = (s, f) => Object.values(s.roles).some((r) => factionOf(r) === f);
+const factionWiped = (s, f) =>
+  factionExists(s, f) && !aliveIds(s).some((id) => factionOf(s.roles[id]) === f);
 
 // 检查胜负;有结果则置 ended。屠边规则:
 //   好人胜 —— 狼人全部出局。
-//   狼人胜 —— 屠平民边(所有平民出局)或屠神边(所有神职出局)。
-// 注:若开局某一边人数为 0(如小局无平民),该边不作为屠边条件,避免开局即判狼胜。
+//   狼人胜 —— 屠平民边(平民全灭)或屠神边(神职全灭)。
+// 阵营由 ROLE_FACTION 推导,加新角色无需改这里。
 function checkWin(s) {
   if (aliveWolves(s).length === 0) { s.winner = 'good'; s.phase = 'ended'; return true; }
-  const hadVillagers = Object.values(s.roles).some((r) => r === ROLE.VILLAGER);
-  const hadGods = Object.values(s.roles).some((r) => r === ROLE.SEER);
-  const villagersWiped = hadVillagers && aliveVillagers(s).length === 0;
-  const godsWiped = hadGods && aliveGods(s).length === 0;
-  if (villagersWiped || godsWiped) { s.winner = 'wolf'; s.phase = 'ended'; return true; }
+  if (factionWiped(s, FACTION.villager) || factionWiped(s, FACTION.god)) {
+    s.winner = 'wolf'; s.phase = 'ended'; return true;
+  }
   return false;
 }
 
