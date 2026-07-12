@@ -16,4 +16,6 @@ A game = one backend module in `server/games/<id>/` implementing the shared inte
 information hiding.
 
 ## More
-Architecture, local dev, deployment, env vars, and troubleshooting live in [SETUP.md](SETUP.md).
+- Agent working rules — invariants, the live-vs-legacy server trap, permission boundaries,
+  and the game-module contract — are in [AGENTS.md](AGENTS.md) and [docs/game-module.md](docs/game-module.md). Read AGENTS.md first.
+- Architecture, local dev, deployment, env vars, and troubleshooting live in [SETUP.md](SETUP.md).
