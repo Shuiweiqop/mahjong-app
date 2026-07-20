@@ -136,8 +136,9 @@ function scheduleDrop(roomCode, memberId) {
     const events = roomsMgr.leaveRoom(roomCode, memberId) || [];
     const still = roomsMgr.getRoom(roomCode);
     if (!still) return;                       // 房间已空 → 已销毁
-    // 宽限期结束仍无人在线:对局不可能再继续,销毁房间释放资源
-    if ((memberSockets.get(roomCode)?.size || 0) === 0) {
+    // 宽限期结束仍无人在线(玩家和观战者都没了):对局不可能再继续,销毁房间释放资源。
+    // 还有观战者在看时不能删 —— 否则他们会卡在一个已不存在的房间里。
+    if ((memberSockets.get(roomCode)?.size || 0) === 0 && still.spectators.length === 0) {
       roomsMgr.clearTimer(still);
       memberSockets.delete(roomCode);
       roomsMgr.rooms.delete(roomCode);

@@ -105,12 +105,15 @@ function leaveRoom(code, memberId) {
     events = room.game.removePlayer(room.state, memberId) || [];
   }
 
-  if (room.members.length === 0) {
+  // 玩家全走光但还有观战者:房间不能销毁,否则观战者卡在一个已不存在的房间里
+  //(sync 什么都拿不到)。等观战者也走完再回收(见上面的观战者分支)。
+  if (room.members.length === 0 && room.spectators.length === 0) {
     clearTimer(room);
     rooms.delete(room.code);
     return [];
   }
   // 房主离开 → 转移房主(state.hostId 也要跟着变,否则局内房主动作会认错人)
+  if (room.members.length === 0) return events;   // 只剩观战者,无房主可转移
   if (room.hostId === memberId) {
     room.hostId = room.members[0].id;
     if (room.state) room.state.hostId = room.hostId;

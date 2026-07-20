@@ -68,6 +68,7 @@ function createInitialState(players) {
     votes: {},                            // 白天投票:{ voterId: targetId|null }(可改票)
     ready: {},                            // 身份揭晓:已点"进入游戏"的玩家 { playerId: true }
     deadline: null,                       // 当前阶段截止时间戳(ms);到点由 tick 兜底推进
+    pausedRemainMs: null,                 // 全员掉线时挂起的剩余时长;重连后据此重设 deadline
     log: [],                              // 公开事件日志
     lastNightVictim: null,
     lastVotedOut: null,
@@ -100,10 +101,17 @@ function checkWin(s) {
 }
 
 // 进入身份揭晓(不计时,等所有存活玩家点"进入游戏";带宽限超时防有人不点卡住)
+// 设置当前阶段截止时间。进入新阶段一律走这里,顺手清掉挂起的剩余时长 ——
+// 否则"挂起期间发生阶段切换"会留下过期的 pausedRemainMs,重连时把新阶段的表改错。
+function setDeadline(s, seconds) {
+  s.deadline = now() + seconds * 1000;
+  s.pausedRemainMs = null;
+}
+
 function enterReveal(s) {
   s.phase = 'reveal';
   s.ready = {};
-  s.deadline = now() + REVEAL_SECONDS * 1000;
+  setDeadline(s, REVEAL_SECONDS);
 }
 
 // 进入夜晚
@@ -111,7 +119,7 @@ function enterNight(s) {
   s.round += 1;
   s.phase = 'night';
   s.nightActions = { wolfTargetVotes: {}, seerCheck: null };
-  s.deadline = now() + NIGHT_SECONDS * 1000;
+  setDeadline(s, NIGHT_SECONDS);
   s.log.push({ type: 'phase', phase: 'night', round: s.round });
 }
 
@@ -120,7 +128,7 @@ function enterNight(s) {
 function enterDay(s) {
   s.phase = 'day';
   s.votes = {};
-  s.deadline = now() + DAY_SECONDS * 1000;
+  setDeadline(s, DAY_SECONDS);
   s.log.push({ type: 'phase', phase: 'day', round: s.round });
 }
 
@@ -254,8 +262,20 @@ function removePlayer(s, playerId) {
   if (!s || !(playerId in s.alive)) return;
   s.absent[playerId] = true;
   if (s.phase === 'ended') return;
+
+  // 全员掉线:上层会停掉每秒 tick,但 deadline 是绝对时间戳、会继续"走"。
+  // 若不挂起,重连后第一次 tick 就发现已过期,当前阶段被瞬间跳过(夜晚直接空刀进白天)。
+  // 这里把"剩余时长"存下来、清空 deadline,restorePlayer 时按剩余量重新计时。
+  if (presentIds(s).length === 0) {
+    if (s.deadline != null) {
+      s.pausedRemainMs = Math.max(0, s.deadline - now());
+      s.deadline = null;
+    }
+    return;
+  }
+
   // 掉线的人可能正是大家在等的最后一个 —— 重新检查当前阶段能否推进
-  if (s.phase === 'reveal' && presentIds(s).length && presentIds(s).every((id) => s.ready[id])) {
+  if (s.phase === 'reveal' && presentIds(s).every((id) => s.ready[id])) {
     enterNight(s);
   } else if (s.phase === 'night') {
     maybeResolveNight(s);
@@ -266,6 +286,11 @@ function removePlayer(s, playerId) {
 function restorePlayer(s, playerId) {
   if (!s || !(playerId in s.alive)) return;
   delete s.absent[playerId];
+  // 曾因全员掉线挂起 → 按掉线时的剩余时长恢复倒计时(而不是让它凭空走完)
+  if (s.pausedRemainMs != null && s.phase !== 'ended') {
+    s.deadline = now() + s.pausedRemainMs;
+    s.pausedRemainMs = null;
+  }
 }
 
 // ── 分角色序列化视图(信息隔离) ──
