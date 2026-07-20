@@ -112,6 +112,26 @@ function bindSocket(room, memberId, socketId) {
   memberSockets.get(room.code).set(memberId, socketId);
 }
 
+// 房间内是否一个连接都没有(玩家/出局者/观战者全不在线)。
+// "该不该停表"取决于还有没有人在看 —— 这是传输层才知道的信息,
+// 游戏模块只看得到"还有没有人能行动",两者不等价,不能混用。
+function roomIsEmpty(room) {
+  return (memberSockets.get(room.code)?.size || 0) === 0;
+}
+
+// 停表:清掉每秒 tick,并让游戏模块挂起 deadline(绝对时间戳,否则停表期间照走)
+function pauseRoomClock(room) {
+  roomsMgr.clearTimer(room);
+  if (room.state && room.game.pauseClock) room.game.pauseClock(room.state);
+}
+
+// 恢复:按挂起时的剩余时长重设 deadline,再重启 tick
+function resumeRoomClock(room) {
+  if (!room.state || room.state.phase === 'ended') return;
+  if (room.game.resumeClock) room.game.resumeClock(room.state);
+  ensureTimer(room);
+}
+
 // ── 断线重连宽限 ──
 // 掉线后不立刻把人从房间移除,留一段时间让他重连回原座位;
 // 超时未回才真正离开(此时才释放名额、必要时转移房主)。
@@ -197,9 +217,9 @@ io.on('connection', (socket) => {
     cancelDrop(room.code, user.id);   // 重连成功 → 取消待执行的移除
     cb?.({ roomCode: room.code, hostId: room.hostId, playerId: user.id, spectator: !!spectator });
     if (room.state) {
+      // 先恢复倒计时再广播,让客户端拿到的是已重设的 deadline
+      resumeRoomClock(room);
       broadcastState(room, rejoinEvents || []);
-      // 全员掉线时 tick 被暂停,这里恢复(对局未结束才需要)
-      if (room.state.phase !== 'ended') ensureTimer(room);
     } else broadcastLobby(room);
   });
 
@@ -294,9 +314,10 @@ io.on('connection', (socket) => {
         : [];
       broadcastState(room, events);
       scheduleDrop(room.code, user.id);
-      // 全员掉线:没人收广播了,先停掉每秒 tick(有人重连时 game_action/ensureTimer 会重启),
-      // 否则空房间会空转整个宽限期。
-      if ((memberSockets.get(code)?.size || 0) === 0) roomsMgr.clearTimer(room);
+      // 房间内一个连接都没有了(玩家、出局者、观战者全走):停表并挂起倒计时。
+      // 判据必须用连接数,不能用"还有没有人能行动"—— 出局玩家仍连着线在看,
+      // 那种情况下表要继续走,否则对局会永久冻结在一个静止画面上。
+      if (roomIsEmpty(room)) pauseRoomClock(room);
       return;
     }
 

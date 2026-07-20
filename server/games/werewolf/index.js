@@ -263,16 +263,12 @@ function removePlayer(s, playerId) {
   s.absent[playerId] = true;
   if (s.phase === 'ended') return;
 
-  // 全员掉线:上层会停掉每秒 tick,但 deadline 是绝对时间戳、会继续"走"。
-  // 若不挂起,重连后第一次 tick 就发现已过期,当前阶段被瞬间跳过(夜晚直接空刀进白天)。
-  // 这里把"剩余时长"存下来、清空 deadline,restorePlayer 时按剩余量重新计时。
-  if (presentIds(s).length === 0) {
-    if (s.deadline != null) {
-      s.pausedRemainMs = Math.max(0, s.deadline - now());
-      s.deadline = null;
-    }
-    return;
-  }
+  // 注意:这里不碰 deadline。"该不该停表"取决于还有没有人在看(传输层才知道:
+  // 出局玩家、观战者都还连着),而本模块只看得到"还有没有人能行动"——两者不等价。
+  // 停表由上层显式调 pauseClock/resumeClock,见 server.js。
+
+  // 没有可行动的人了,不必再判断推进(空数组 every 恒真,会误推进阶段)
+  if (presentIds(s).length === 0) return;
 
   // 掉线的人可能正是大家在等的最后一个 —— 重新检查当前阶段能否推进
   if (s.phase === 'reveal' && presentIds(s).every((id) => s.ready[id])) {
@@ -282,15 +278,44 @@ function removePlayer(s, playerId) {
   }
 }
 
+// 宽限期超时仍未回来 → 真正判出局,并重跑胜负。
+// 只标 absent 不够:checkWin 用 aliveIds,唯一的狼永久退出后好人永远赢不了,
+// 只能白天把这个幽灵投出去。
+function eliminatePlayer(s, playerId) {
+  if (!s || s.phase === 'ended' || !s.alive[playerId]) return [];
+  s.alive[playerId] = false;
+  delete s.absent[playerId];
+  s.log.push({ type: 'left', playerId });
+  if (checkWin(s)) return [{ type: 'game_over' }];
+  // 走的人可能正是大家在等的最后一个 —— 重新检查当前阶段能否推进
+  if (s.phase === 'reveal' && presentIds(s).length && presentIds(s).every((id) => s.ready[id])) {
+    enterNight(s);
+  } else if (s.phase === 'night') {
+    maybeResolveNight(s);
+  }
+  return [];
+}
+
+// ── 停表/恢复(由上层在"房间内一个连接都没有 / 有人重连"时调用) ──
+// deadline 是绝对时间戳,停表期间会继续"走";不挂起的话重连后首次 tick
+// 就判定过期,当前阶段被瞬间跳过。
+function pauseClock(s) {
+  if (!s || s.phase === 'ended' || s.deadline == null) return;
+  s.pausedRemainMs = Math.max(0, s.deadline - now());
+  s.deadline = null;
+}
+
+function resumeClock(s) {
+  if (!s || s.phase === 'ended' || s.pausedRemainMs == null) return;
+  s.deadline = now() + s.pausedRemainMs;
+  s.pausedRemainMs = null;
+}
+
 // 重连:恢复在场状态(座位、角色、存活都还在)
 function restorePlayer(s, playerId) {
   if (!s || !(playerId in s.alive)) return;
   delete s.absent[playerId];
-  // 曾因全员掉线挂起 → 按掉线时的剩余时长恢复倒计时(而不是让它凭空走完)
-  if (s.pausedRemainMs != null && s.phase !== 'ended') {
-    s.deadline = now() + s.pausedRemainMs;
-    s.pausedRemainMs = null;
-  }
+  // 不在这里恢复倒计时:停表与否由上层按"房间还有没有连接"决定(见 resumeClock)
 }
 
 // ── 分角色序列化视图(信息隔离) ──
@@ -362,5 +387,8 @@ module.exports = {
   isGameOver,
   removePlayer,
   restorePlayer,
+  eliminatePlayer,
+  pauseClock,
+  resumeClock,
   ROLE,
 };

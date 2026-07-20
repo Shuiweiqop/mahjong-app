@@ -100,9 +100,12 @@ function leaveRoom(code, memberId) {
 
   // 同步对局状态:成员列表和 state 是两份数据,不同步就会留下"幽灵玩家"
   //(仍被算作存活/仍在轮转里),导致流程卡在等一个永远不会行动的人。
+  // 走到 leaveRoom 说明是真的离开(宽限期已过或主动退出),用 eliminatePlayer
+  // 判其出局并重跑胜负 —— 只标 absent 的话唯一的狼退出后好人永远赢不了。
   let events = [];
-  if (room.state && room.game.removePlayer) {
-    events = room.game.removePlayer(room.state, memberId) || [];
+  if (room.state) {
+    const drop = room.game.eliminatePlayer || room.game.removePlayer;
+    if (drop) events = drop(room.state, memberId) || [];
   }
 
   // 玩家全走光但还有观战者:房间不能销毁,否则观战者卡在一个已不存在的房间里

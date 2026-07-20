@@ -50,6 +50,7 @@ function createInitialState(players, config) {
     usedWords: [],
     guessedThisRound: {},           // { playerId: pointsAwarded }
     absent: {},                     // 掉线玩家 { playerId: true };不轮到、不计入"全猜中"
+    pausedRemainMs: null,           // 房间无连接时挂起的剩余时长(见 pauseClock)
     strokes: [],                    // 当前轮已画笔画(用于中途加入者补画)
     deadline: null,                 // 当前阶段截止时间戳(ms)
     hostId: players[0]?.id || null,
@@ -181,6 +182,7 @@ function applyAction(state, action, playerId) {
     case 'tick': {
       // 服务端计时器:检查当前阶段是否到点,推进状态
       if (!state.deadline || now() < state.deadline) return { state, events };
+      if (!state.drawerId) return { state, events };   // 轮转空(全掉线挂起中),无可推进
       if (state.phase === 'pick') {
         // 画手没选 → 自动选第一个
         if (state.wordChoices.length) {
@@ -214,12 +216,12 @@ function removePlayer(state, playerId) {
     if (idx <= state.turnIndex) state.turnIndex -= 1;
   }
 
-  // 所有人都掉线了:不就地结束对局 —— 全员短暂掉线(如切网)后仍应能重连续玩。
-  // 只把当前轮挂起(drawerId 置空、停表),真正的结束交给上层宽限期超时后的清理。
+  // 轮转里没人了:不就地结束对局 —— 全员短暂掉线(如切网)后仍应能重连续玩。
+  // 只把当前轮挂起(没有画手可选),真正的结束交给上层宽限期超时后的清理。
   // 注意 startNextTurn 对空 order 取模会得到 NaN,所以这里必须提前返回。
+  // deadline 不在这里动:停表由上层按"房间还有没有连接"决定(见 pauseClock)。
   if (state.order.length === 0) {
     state.drawerId = null;
-    state.deadline = null;
     return [];
   }
 
@@ -246,12 +248,47 @@ function restorePlayer(state, playerId) {
   delete state.absent[playerId];
   if (state.phase === 'ended') return [];
   if (!state.order.includes(playerId)) state.order.push(playerId);
-  // 曾因全员掉线被挂起(无画手/无倒计时)→ 有人回来了,重新开一轮
+  // 曾因轮转清空被挂起(无画手)→ 有人回来了,重新开一轮
   if (!state.drawerId && state.phase !== 'lobby') {
     state.turnIndex = -1;
+    state.pausedRemainMs = null;   // 重开一轮会设新 deadline,旧的挂起值作废
     return startNextTurn(state);
   }
   return [];
+}
+
+// 宽限期超时仍未回来 → 永久移出,并按剩余人数收缩总轮数。
+// roundsTotal 开局按人数算死,不收缩的话 4 人局走 1 人后剩 3 人仍要打满 8 轮。
+function eliminatePlayer(state, playerId) {
+  if (!state || state.phase === 'ended') return [];
+  const events = removePlayer(state, playerId) || [];
+  delete state.absent[playerId];
+  state.players = state.players.filter((p) => p.id !== playerId);
+
+  // 按当前人数重算总轮数;已打过的轮数不退,故不低于 roundsDone
+  const target = state.players.length * state.cfg.roundsPerPlayer;
+  state.roundsTotal = Math.max(state.roundsDone, target);
+  if (state.roundsDone >= state.roundsTotal && state.phase !== 'ended') {
+    state.phase = 'ended';
+    state.drawerId = null;
+    state.deadline = null;
+    return [...events, { type: 'game_over' }];
+  }
+  return events;
+}
+
+// ── 停表/恢复(由上层在"房间内一个连接都没有 / 有人重连"时调用) ──
+// 理由同 werewolf:deadline 是绝对时间戳,停表期间会继续走。
+function pauseClock(state) {
+  if (!state || state.phase === 'ended' || state.deadline == null) return;
+  state.pausedRemainMs = Math.max(0, state.deadline - now());
+  state.deadline = null;
+}
+
+function resumeClock(state) {
+  if (!state || state.phase === 'ended' || state.pausedRemainMs == null) return;
+  state.deadline = now() + state.pausedRemainMs;
+  state.pausedRemainMs = null;
 }
 
 // ── 序列化视图(信息隔离:画手可见词,猜者不可见) ──────────
@@ -306,6 +343,9 @@ module.exports = {
   isGameOver,
   removePlayer,
   restorePlayer,
+  eliminatePlayer,
+  pauseClock,
+  resumeClock,
   // 房主配置元数据(供前端设置面板)
   configSchema: {
     drawSeconds: { options: DRAW_SECONDS_OPTIONS, default: DEFAULTS.drawSeconds },
