@@ -61,6 +61,7 @@ function createInitialState(players) {
     players: players.map((p) => ({ id: p.id, name: p.name })),
     roles,                                // { playerId: role }(内部,不整体下发)
     alive: Object.fromEntries(ids.map((id) => [id, true])),
+    absent: {},                           // 掉线/离开的玩家 { playerId: true };仍算存活但不参与推进判定
     round: 0,
     nightActions: {},                     // 本夜:{ wolfTargetVotes:{voterId:targetId}, seerCheck:{seerId,targetId} }
     seerResults: {},                      // { seerId: { [targetId]: 'wolf'|'good' } } 累积查验结果
@@ -77,6 +78,9 @@ function createInitialState(players) {
 
 const aliveIds = (s) => s.players.map((p) => p.id).filter((id) => s.alive[id]);
 const aliveWolves = (s) => aliveIds(s).filter((id) => s.roles[id] === ROLE.WOLF);
+// 在场 = 存活且未掉线。只用于"还要等谁行动"的推进判定;
+// 胜负判定一律用 aliveIds —— 掉线不等于出局,否则退game即可送对面赢。
+const presentIds = (s) => aliveIds(s).filter((id) => !s.absent[id]);
 // 某阵营开局是否存在,以及是否已被全屠(存活为 0)。屠边只对开局存在的阵营成立,
 // 避免小局某边人数为 0 时开局即判狼胜。
 const factionExists = (s, f) => Object.values(s.roles).some((r) => factionOf(r) === f);
@@ -173,7 +177,7 @@ function applyAction(s, action, playerId) {
     case 'ready': {
       if (s.phase !== 'reveal') return { state: s, events }; // 幂等:非揭晓阶段忽略
       s.ready[playerId] = true;
-      if (aliveIds(s).every((id) => s.ready[id])) enterNight(s);
+      if (presentIds(s).every((id) => s.ready[id])) enterNight(s);
       return { state: s, events };
     }
 
@@ -231,11 +235,37 @@ function applyAction(s, action, playerId) {
 }
 
 // 夜晚是否可结算:所有存活狼人已投 + (无存活预言家 或 预言家已查验)
+// 只等"在场"的狼/预言家;掉线者不阻塞提前结算(到点仍有 tick 兜底)。
 function maybeResolveNight(s) {
-  const wolvesDone = aliveWolves(s).every((id) => id in s.nightActions.wolfTargetVotes);
-  const seers = aliveIds(s).filter((id) => s.roles[id] === ROLE.SEER);
+  const wolves = presentIds(s).filter((id) => s.roles[id] === ROLE.WOLF);
+  const wolvesDone = wolves.every((id) => id in s.nightActions.wolfTargetVotes);
+  const seers = presentIds(s).filter((id) => s.roles[id] === ROLE.SEER);
   const seerDone = seers.length === 0 || s.nightActions.seerCheck != null;
+  // 狼全掉线时 wolves 为空,every 恒真 —— 不能就地空刀结算,交给 tick 到点处理,
+  // 否则夜晚会在掉线瞬间被秒结算。
+  if (wolves.length === 0) return;
   if (wolvesDone && seerDone) resolveNight(s);
+}
+
+// ── 掉线/重连 ──
+// 掉线只标记"不在场",不判出局:退game不应把胜利送给对面。
+// 影响的只是"还要等谁行动",胜负仍按 alive 计算。
+function removePlayer(s, playerId) {
+  if (!s || !(playerId in s.alive)) return;
+  s.absent[playerId] = true;
+  if (s.phase === 'ended') return;
+  // 掉线的人可能正是大家在等的最后一个 —— 重新检查当前阶段能否推进
+  if (s.phase === 'reveal' && presentIds(s).length && presentIds(s).every((id) => s.ready[id])) {
+    enterNight(s);
+  } else if (s.phase === 'night') {
+    maybeResolveNight(s);
+  }
+}
+
+// 重连:恢复在场状态(座位、角色、存活都还在)
+function restorePlayer(s, playerId) {
+  if (!s || !(playerId in s.alive)) return;
+  delete s.absent[playerId];
 }
 
 // ── 分角色序列化视图(信息隔离) ──
@@ -244,7 +274,9 @@ function serializeStateFor(s, playerId) {
   const view = {
     phase: s.phase,
     round: s.round,
-    players: s.players.map((p) => ({ id: p.id, name: p.name, alive: s.alive[p.id] })),
+    players: s.players.map((p) => ({
+      id: p.id, name: p.name, alive: s.alive[p.id], absent: !!s.absent[p.id],
+    })),
     myRole,
     myId: playerId,
     alive: s.alive[playerId],
@@ -303,5 +335,7 @@ module.exports = {
   applyAction,
   serializeStateFor,
   isGameOver,
+  removePlayer,
+  restorePlayer,
   ROLE,
 };

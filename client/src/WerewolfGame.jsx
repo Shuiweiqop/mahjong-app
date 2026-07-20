@@ -42,8 +42,12 @@ export default function WerewolfGame({ state, act, me }) {
   const players = state.players || [];
   const nameOf = (id) => players.find((p) => p.id === id)?.name || '玩家';
   const role = ROLE_INFO[state.myRole] || ROLE_INFO.villager;
-  const iAmAlive = state.alive;
+  // 观战者不是本局玩家:既不算存活也不算出局,不显示"你已出局"之类的玩家态提示
+  const isSpectator = !!state.spectator;
+  const iAmAlive = isSpectator ? null : state.alive;
   const alivePlayers = players.filter((p) => p.alive);
+  // 上帝视角(房主开启)下,观战者可见每个人的角色
+  const godRoles = isSpectator && state.roles ? state.roles : null;
 
   // 身份序幕:仅在服务端 reveal 阶段显示(此阶段夜晚尚未计时)。
   // 点"进入游戏"→ 发 ready;等所有存活玩家就绪(或宽限超时),服务端推进到 night,序幕自然消失。
@@ -90,16 +94,29 @@ export default function WerewolfGame({ state, act, me }) {
         <span style={ui.badge}>第 {state.round} 天</span>
         <span style={ui.badge}>{phaseLabel}</span>
         <Countdown deadline={state.deadline} />
-        <span style={{ ...ui.badge, background: iAmAlive ? 'var(--surface-2)' : 'var(--danger)' }}>
-          {role.emoji} 你是{role.name}{iAmAlive ? '' : ' · 已出局'}
-        </span>
+        {isSpectator ? (
+          <span style={ui.badge}>👀 观战{state.spectatorGodView ? ' · 上帝视角' : ''}</span>
+        ) : (
+          <span style={{ ...ui.badge, background: iAmAlive ? 'var(--surface-2)' : 'var(--danger)' }}>
+            {role.emoji} 你是{role.name}{iAmAlive ? '' : ' · 已出局'}
+          </span>
+        )}
       </div>
 
       <div className="game-layout" style={{ '--side': '220px' }}>
         {/* 左:主区(角色行动 / 讨论 / 投票);窄屏下降级为单栏,侧栏落到下方 */}
         <div style={ui.card}>
-          {/* 我的身份卡 */}
+          {/* 我的身份卡(观战者没有身份,显示观战说明) */}
           <div style={{ marginBottom: 14, padding: 12, borderRadius: 10, background: 'var(--surface-2)' }}>
+            {isSpectator ? (
+              <>
+                <div style={{ fontWeight: 800, marginBottom: 4 }}>👀 观战中</div>
+                <div style={{ fontSize: 13, color: 'var(--muted)' }}>
+                  你不参与本局{state.spectatorGodView ? ',房主已开启上帝视角,右侧可见所有身份' : ',仅可见公开信息'}
+                </div>
+              </>
+            ) : (
+              <>
             <div style={{ fontWeight: 800, marginBottom: 4 }}>{role.emoji} {role.name}</div>
             <div style={{ fontSize: 13, color: 'var(--muted)' }}>{role.desc}</div>
             {state.myRole === 'wolf' && state.wolfTeammates && (
@@ -115,10 +132,14 @@ export default function WerewolfGame({ state, act, me }) {
                   `${nameOf(id)}=${r === 'wolf' ? '狼人❌' : '好人✅'}`).join('、')}
               </div>
             )}
+              </>
+            )}
           </div>
 
           {/* 行动区 */}
-          {!iAmAlive ? (
+          {isSpectator ? (
+            <p style={{ color: 'var(--muted)', textAlign: 'center' }}>👀 观战中,无法参与行动</p>
+          ) : !iAmAlive ? (
             <p style={{ color: 'var(--muted)', textAlign: 'center' }}>你已出局,静静观战…</p>
           ) : state.phase === 'night' ? (
             <NightActions state={state} act={act} me={me} alivePlayers={alivePlayers} />
@@ -134,6 +155,11 @@ export default function WerewolfGame({ state, act, me }) {
             <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 14, padding: '4px 0',
               color: p.alive ? 'var(--text)' : 'var(--muted)', textDecoration: p.alive ? 'none' : 'line-through' }}>
               <span>{p.alive ? '🙂' : '💀'} {p.name}{p.id === me.id ? ' (你)' : ''}</span>
+              {godRoles?.[p.id] && (
+                <span style={{ color: 'var(--accent)', fontSize: 13 }}>
+                  {ROLE_INFO[godRoles[p.id]]?.emoji} {ROLE_INFO[godRoles[p.id]]?.name}
+                </span>
+              )}
             </div>
           ))}
         </div>

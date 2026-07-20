@@ -49,6 +49,7 @@ function createInitialState(players, config) {
     word: null,                     // 当前词(仅内部/画手可见)
     usedWords: [],
     guessedThisRound: {},           // { playerId: pointsAwarded }
+    absent: {},                     // 掉线玩家 { playerId: true };不轮到、不计入"全猜中"
     strokes: [],                    // 当前轮已画笔画(用于中途加入者补画)
     deadline: null,                 // 当前阶段截止时间戳(ms)
     hostId: players[0]?.id || null,
@@ -68,6 +69,13 @@ function startNextTurn(state) {
     return events;
   }
 
+  if (state.order.length === 0) {           // 全员掉线兜底
+    state.phase = 'ended';
+    state.drawerId = null;
+    state.deadline = null;
+    events.push({ type: 'game_over' });
+    return events;
+  }
   state.turnIndex = (state.turnIndex + 1) % state.order.length;
   state.drawerId = state.order[state.turnIndex];
   state.phase = 'pick';
@@ -156,9 +164,11 @@ function applyAction(state, action, playerId) {
         state.scores[state.drawerId] = (state.scores[state.drawerId] || 0) + 25;
         events.push({ type: 'guessed', playerId, points: pts });
 
-        // 所有非画手都猜中 → 提前结束本轮
-        const guessers = state.players.filter((p) => p.id !== state.drawerId);
-        const allGuessed = guessers.every((p) => state.guessedThisRound[p.id]);
+        // 所有在场的非画手都猜中 → 提前结束本轮(掉线者不计,否则永远凑不齐)
+        const guessers = state.players.filter(
+          (p) => p.id !== state.drawerId && !state.absent[p.id]
+        );
+        const allGuessed = guessers.length > 0 && guessers.every((p) => state.guessedThisRound[p.id]);
         if (allGuessed) events.push(...endRound(state, 'all_guessed'));
         return { state, events };
       } else {
@@ -189,12 +199,67 @@ function applyAction(state, action, playerId) {
   }
 }
 
+// ── 掉线/重连 ──────────────────────────────────────────────
+// 掉线者移出画手轮转,并且不再计入"全员猜中"。分数保留,重连可继续。
+function removePlayer(state, playerId) {
+  if (!state || state.phase === 'ended') return [];
+  if (!state.order.includes(playerId) && !state.absent[playerId]) return [];
+  state.absent[playerId] = true;
+
+  const idx = state.order.indexOf(playerId);
+  if (idx !== -1) {
+    state.order.splice(idx, 1);
+    // 维持 turnIndex 指向"当前画手"的语义:删掉的位置在当前之前(或就是当前)时前移,
+    // 否则下一次 +1 会跳过一个人 / 重复当前这个人。
+    if (idx <= state.turnIndex) state.turnIndex -= 1;
+  }
+
+  // 所有人都掉线了:不就地结束对局 —— 全员短暂掉线(如切网)后仍应能重连续玩。
+  // 只把当前轮挂起(drawerId 置空、停表),真正的结束交给上层宽限期超时后的清理。
+  // 注意 startNextTurn 对空 order 取模会得到 NaN,所以这里必须提前返回。
+  if (state.order.length === 0) {
+    state.drawerId = null;
+    state.deadline = null;
+    return [];
+  }
+
+  // 当前画手掉线 → 本轮作废,立刻进入下一轮(否则空转到超时)
+  if (playerId === state.drawerId && (state.phase === 'pick' || state.phase === 'draw')) {
+    return startNextTurn(state);
+  }
+
+  // 掉线的可能是大家在等的最后一个猜者 → 重新检查能否提前结束本轮
+  if (state.phase === 'draw') {
+    const guessers = state.players.filter(
+      (p) => p.id !== state.drawerId && !state.absent[p.id]
+    );
+    if (guessers.length > 0 && guessers.every((p) => state.guessedThisRound[p.id])) {
+      return endRound(state, 'all_guessed');
+    }
+  }
+  return [];
+}
+
+// 重连:恢复在场并放回轮转队尾(分数一直保留)
+function restorePlayer(state, playerId) {
+  if (!state || !state.absent[playerId]) return [];
+  delete state.absent[playerId];
+  if (state.phase === 'ended') return [];
+  if (!state.order.includes(playerId)) state.order.push(playerId);
+  // 曾因全员掉线被挂起(无画手/无倒计时)→ 有人回来了,重新开一轮
+  if (!state.drawerId && state.phase !== 'lobby') {
+    state.turnIndex = -1;
+    return startNextTurn(state);
+  }
+  return [];
+}
+
 // ── 序列化视图(信息隔离:画手可见词,猜者不可见) ──────────
 function serializeStateFor(state, playerId) {
   const isDrawer = playerId === state.drawerId;
   const view = {
     phase: state.phase,
-    players: state.players,
+    players: state.players.map((p) => ({ ...p, absent: !!state.absent[p.id] })),
     scores: state.scores,
     drawerId: state.drawerId,
     roundsDone: state.roundsDone,
@@ -239,6 +304,8 @@ module.exports = {
   applyAction,
   serializeStateFor,
   isGameOver,
+  removePlayer,
+  restorePlayer,
   // 房主配置元数据(供前端设置面板)
   configSchema: {
     drawSeconds: { options: DRAW_SECONDS_OPTIONS, default: DEFAULTS.drawSeconds },

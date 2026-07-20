@@ -93,9 +93,32 @@ export default function GameRoom({ socket, roomCode, me, onLeave }) {
 
   // ── 对局中:按 gameId 分发给对应游戏组件 ──
   const GameView = GAME_VIEWS[gameId];
+  const spectators = state.spectators || [];
   return (
     <div style={ui.wrap}>
       <TopBar roomCode={roomCode} onLeave={onLeave} />
+      {state.spectator && (
+        <div style={{ ...ui.card, padding: '10px 14px', marginBottom: 12, textAlign: 'center' }}>
+          <span style={{ fontSize: 14 }}>
+            👀 观战中(不参与本局)
+            {state.spectatorGodView && <b style={{ color: 'var(--accent)' }}> · 上帝视角</b>}
+          </span>
+        </div>
+      )}
+      {!state.spectator && spectators.length > 0 && (
+        <div style={{ color: 'var(--muted)', fontSize: 13, marginBottom: 8, textAlign: 'center' }}>
+          👀 {spectators.length} 人观战{state.spectatorGodView ? '(可见身份)' : ''}
+        </div>
+      )}
+      {isHost && (
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'center',
+                        color: 'var(--muted)', fontSize: 13, marginBottom: 10 }}>
+          <input type="checkbox" checked={!!state.spectatorGodView}
+            onChange={(e) => socket.current?.emit('set_spectator_godview',
+              { enabled: e.target.checked }, (r) => r?.error && alert(r.error))} />
+          允许观战者看到所有身份(上帝视角)
+        </label>
+      )}
       {GameView
         ? <GameView state={state} act={act} me={me} socket={socket} onLeave={onLeave} />
         : <p style={{ color: 'var(--muted)', textAlign: 'center' }}>未知游戏类型:{gameId}</p>}

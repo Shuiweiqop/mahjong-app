@@ -137,7 +137,7 @@ export default function DrawGuessGame({ state, act, me, socket, onLeave }) {
               ))}
               <div ref={chatEndRef} />
             </div>
-            {!isDrawer && state?.phase === 'draw' && !state?.guessed?.includes(me.id) && (
+            {!isDrawer && !state?.spectator && state?.phase === 'draw' && !state?.guessed?.includes(me.id) && (
               <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
                 <input style={{ ...ui.input, marginBottom: 0 }} value={guess} placeholder="输入你的猜测…"
                   onChange={(e) => setGuess(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && sendGuess()} />
