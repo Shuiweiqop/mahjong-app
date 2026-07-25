@@ -147,6 +147,20 @@ function startGame(room) {
   return room.state;
 }
 
+// 再来一局:清回大厅,复用现有的大厅/开始流程。
+// 上一局的观战者(中途进来的)转正为正式成员 —— 新一局他们能真正参与;
+// 若因此超出 maxPlayers 则截断(先到先得)。config 保留,让"相同配置再来"顺滑。
+function resetToLobby(room) {
+  clearTimer(room);
+  for (const sp of room.spectators) {
+    if (room.members.length >= room.game.maxPlayers) break;
+    if (!room.members.find((m) => m.id === sp.id)) room.members.push(sp);
+  }
+  room.spectators = [];
+  room.state = null;
+  return room;
+}
+
 function clearTimer(room) {
   if (room.timer) { clearInterval(room.timer); room.timer = null; }
 }
@@ -158,6 +172,7 @@ module.exports = {
   joinRoom,
   leaveRoom,
   startGame,
+  resetToLobby,
   clearTimer,
   generateRoomCode,
   spectatorViewFor,

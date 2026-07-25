@@ -122,6 +122,19 @@ export default function GameRoom({ socket, roomCode, me, onLeave }) {
       {GameView
         ? <GameView state={state} act={act} me={me} socket={socket} onLeave={onLeave} />
         : <p style={{ color: 'var(--muted)', textAlign: 'center' }}>未知游戏类型:{gameId}</p>}
+      {/* 对局结束:房主可原班人马再来一局(回大厅);其余人等房主。观战者不显示。 */}
+      {state.phase === 'ended' && !state.spectator && (
+        isHost ? (
+          <button style={{ ...ui.btnAccent, width: '100%', marginTop: 12 }}
+            onClick={() => socket.current?.emit('rematch', (r) => r?.error && alert(r.error))}>
+            🔄 再来一局
+          </button>
+        ) : (
+          <p style={{ color: 'var(--muted)', fontSize: 13, textAlign: 'center', marginTop: 12 }}>
+            等房主再来一局…
+          </p>
+        )
+      )}
     </div>
   );
 }

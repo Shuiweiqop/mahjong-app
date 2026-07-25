@@ -267,6 +267,17 @@ io.on('connection', (socket) => {
     if (still) broadcastLobby(still);
   });
 
+  // 房主发起"再来一局":对局结束后清回大厅,复用大厅/开始流程
+  socket.on('rematch', (cb) => {
+    const room = roomsMgr.getRoom(socket.data.roomCode);
+    if (!room) return cb?.({ error: '不在房间中' });
+    if (user.id !== room.hostId) return cb?.({ error: '只有房主能再来一局' });
+    if (!room.state || room.state.phase !== 'ended') return cb?.({ error: '本局尚未结束' });
+    roomsMgr.resetToLobby(room);
+    cb?.({ ok: true });
+    broadcastLobby(room);   // 所有人(含转正的观战者)回到大厅
+  });
+
   socket.on('game_action', ({ action }, cb) => {
     const room = roomsMgr.getRoom(socket.data.roomCode);
     if (!room) return cb?.({ error: '不在房间中' });
