@@ -26,6 +26,7 @@ const factionOf = (role) => ROLE_FACTION[role];
 const REVEAL_SECONDS = 30;  // 身份揭晓:等所有人点"进入游戏";此宽限超时只为防有人不点而卡住
 const NIGHT_SECONDS = 40;   // 夜晚:狼人选刀 + 预言家查验
 const DAY_SECONDS = 60;     // 白天:讨论 + 投票放逐(时间内可随时改票,到点结算)
+const DAY_HURRY_SECONDS = 5; // 白天全员投完后,把倒计时压到这么短 —— 留个改票窗口,不立即结算
 
 const now = () => Date.now();
 
@@ -218,6 +219,7 @@ function applyAction(s, action, playerId) {
       if (!isAlive) return { error: '死亡玩家不能投票' };
       if (action.target && !s.alive[action.target]) return { error: '目标无效' };
       s.votes[playerId] = action.target || null;
+      hurryDayIfAllVoted(s);   // 全员投完 → 把倒计时压到 DAY_HURRY_SECONDS(仍可改票)
       return { state: s, events };
     }
 
@@ -240,6 +242,18 @@ function applyAction(s, action, playerId) {
     default:
       return { error: '未知动作' };
   }
+}
+
+// 白天全员投完 → 把 deadline 压到 DAY_HURRY_SECONDS 后(只缩短,不延长)。
+// "全员"= 所有在场存活玩家都有票记录(弃票 null 也算已投);掉线者不阻塞,
+// 与 maybeResolveNight 用 presentIds 保持一致。压缩后仍可改票,到点由 tick 结算。
+function hurryDayIfAllVoted(s) {
+  if (s.phase !== 'day' || s.deadline == null) return;
+  const voters = presentIds(s);
+  if (voters.length === 0) return;                        // 没人能投票,不处理
+  if (!voters.every((id) => id in s.votes)) return;       // 还有人没投
+  const hurryUntil = now() + DAY_HURRY_SECONDS * 1000;
+  if (hurryUntil < s.deadline) s.deadline = hurryUntil;   // 只往前提,不回退
 }
 
 // 夜晚是否可结算:所有存活狼人已投 + (无存活预言家 或 预言家已查验)
@@ -275,6 +289,8 @@ function removePlayer(s, playerId) {
     enterNight(s);
   } else if (s.phase === 'night') {
     maybeResolveNight(s);
+  } else if (s.phase === 'day') {
+    hurryDayIfAllVoted(s);   // 走的人若正好是剩下唯一没投的,压缩倒计时
   }
 }
 
@@ -292,6 +308,8 @@ function eliminatePlayer(s, playerId) {
     enterNight(s);
   } else if (s.phase === 'night') {
     maybeResolveNight(s);
+  } else if (s.phase === 'day') {
+    hurryDayIfAllVoted(s);
   }
   return [];
 }
@@ -362,6 +380,9 @@ function serializeStateFor(s, playerId) {
     view.votes = s.votes;
     view.iVoted = playerId in s.votes;
     view.myVote = playerId in s.votes ? s.votes[playerId] : undefined;
+    // 全员(在场存活)已投 → 前端提示"即将结算",解释倒计时为何突然缩短
+    const voters = presentIds(s);
+    view.dayAllVoted = voters.length > 0 && voters.every((id) => id in s.votes);
   }
   // 结束:公开所有身份
   if (s.phase === 'ended') {

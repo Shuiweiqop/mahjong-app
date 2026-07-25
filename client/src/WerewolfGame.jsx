@@ -216,7 +216,7 @@ function DayVote({ state, act, me, alivePlayers, nameOf }) {
           ? `昨晚 ${nameOf(state.lastNightVictim)} 遇害了` : '昨晚是平安夜,无人死亡'}
       </p>
       <p style={{ color: 'var(--muted)', fontSize: 13, marginBottom: 12, textAlign: 'center' }}>
-        讨论并投票放逐一名玩家 · 时间内可改票 · 到点结算(平票无人出局)
+        讨论并投票放逐一名玩家 · 时间内可改票 · 全员投完后加速结算(平票无人出局)
       </p>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         {candidates.map((p) => {
@@ -236,6 +236,11 @@ function DayVote({ state, act, me, alivePlayers, nameOf }) {
         </button>
       </div>
       {!voted && <WaitHint text="你还没投票 — 到点未投将视为弃票" />}
+      {state.dayAllVoted && (
+        <p style={{ color: 'var(--accent)', fontSize: 13, marginTop: 10, textAlign: 'center' }}>
+          ✓ 全员已投,即将结算 · 仍可改票
+        </p>
+      )}
     </div>
   );
 }
