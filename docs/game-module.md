@@ -72,6 +72,16 @@ red — no test, no lint, no type error catches it. In drawguess this is why the
 If you're changing what a player can see, this function is the diff. Cross-check it against
 `isGameOver` (which may also expose `roles`/`ranking` at game end).
 
+Two consumers you can't see from this file rely on the allow-list discipline:
+`rooms.js` builds the **spectator** view by calling your `serializeStateFor` with a player id that
+doesn't exist, expecting an unrecognized id to match no role branch and receive pure public data.
+Assign a default role to unknown ids and every spectator sees everything. See
+`docs/rooms-and-sockets.md`.
+
+`server/games/contract.test.js` (`npm test` in `server/`) pins both properties: a canary field
+added to `state` must not appear in any player's view, and an unknown id must not receive
+`roles` or `myRole`. Run it after touching this function.
+
 ## The frontend view
 
 Registered in `GAME_VIEWS`, rendered by `GameRoom.jsx`. Receives props
