@@ -241,7 +241,11 @@ function applyAction(s, action, playerId) {
     case 'seer_check': {
       if (s.phase !== 'night') return { error: '非夜晚阶段' };
       if (!isAlive || s.roles[playerId] !== ROLE.SEER) return { error: '只有预言家能查验' };
+      // 每夜只能查一个。seerResults 是跨夜累积的,不像狼人的 wolfTargetVotes 那样
+      // 按玩家 id 覆盖 —— 少了这道门禁,预言家一夜就能把全场查穿,天亮直接报完狼坑。
+      if (s.nightActions.seerCheck) return { error: '今晚已经查验过了' };
       if (!s.alive[action.target]) return { error: '目标无效' };
+      if (action.target === playerId) return { error: '不能查验自己' };
       const result = s.roles[action.target] === ROLE.WOLF ? 'wolf' : 'good';
       s.seerResults[playerId] = s.seerResults[playerId] || {};
       s.seerResults[playerId][action.target] = result;

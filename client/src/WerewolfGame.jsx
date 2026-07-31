@@ -214,12 +214,17 @@ function NightActions({ state, act, me, alivePlayers }) {
     );
   }
   if (state.myRole === 'seer') {
+    // 与狼人不同:查验每夜只有一次,不能改。已查验后禁用按钮 ——
+    // 否则玩家会一直点,只收到服务端的"今晚已经查验过了"弹窗。
     return (
       <div>
-        <p style={{ marginBottom: 10, fontWeight: 700, textAlign: 'center' }}>🔮 查验一名玩家的身份</p>
+        <p style={{ marginBottom: 10, fontWeight: 700, textAlign: 'center' }}>
+          {acted ? '🔮 今晚已查验(每夜限一次)' : '🔮 查验一名玩家的身份'}
+        </p>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {targets.map((p) => (
-            <button key={p.id} style={ui.btnGhost}
+            <button key={p.id} disabled={acted}
+              style={{ ...ui.btnGhost, ...(acted ? { opacity: 0.45, cursor: 'not-allowed' } : null) }}
               onClick={() => act({ type: 'seer_check', target: p.id })}>查验 {p.name}</button>
           ))}
         </div>
