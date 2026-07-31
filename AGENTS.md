@@ -40,6 +40,11 @@ via `pg` is the only DB path.
 - **Never** commit a secret. `server/.env` is gitignored and holds real values; `.env.example` is
   the template. Don't move values between them.
 
+`JWT_SECRET` has no fallback value on purpose. With `DATABASE_URL` set (treated as production)
+the server refuses to start without it; locally it generates a random one per boot. Never
+reintroduce a hardcoded default to "make it run" — a secret committed to an open repo lets anyone
+sign a token for any user, and nothing about the running service would look wrong.
+
 ## Priority order (when guidance conflicts)
 
 1. The information-hiding and server-authority invariants below — these are correctness and
