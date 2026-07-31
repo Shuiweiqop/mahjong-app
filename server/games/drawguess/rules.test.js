@@ -138,6 +138,27 @@ test('画手不能猜自己的词', () => {
   assert.ok(dg.applyAction(s, { type: 'guess', text: s.word }, s.drawerId).error);
 });
 
+test('观战者不能行动,更不能靠"猜词"把答案骗出来', () => {
+  // serializeStateFor 按 guessedThisRound 决定给不给 word。观战者若能猜词,
+  // 猜中就会被写进 guessedThisRound,下一次广播就把答案发给他了。
+  // 前端本来就不给观战者显示输入框,但客户端消息只是"请求",必须服务端挡。
+  const s = drawState();
+  const r = dg.applyAction(s, { type: 'guess', text: s.word }, '__spectator__');
+
+  assert.ok(r.error, '观战者不该能猜词');
+  assert.strictEqual(s.scores['__spectator__'], undefined, '观战者不该进计分表');
+  assert.strictEqual(s.guessedThisRound['__spectator__'], undefined, '观战者不该进猜中表');
+  assert.strictEqual(
+    dg.serializeStateFor(s, '__spectator__').word, undefined,
+    '观战者视图绝不能出现答案'
+  );
+});
+
+test('tick 不受"必须是本局玩家"限制(服务端驱动,无行动者)', () => {
+  const s = drawState();
+  assert.ok(!dg.applyAction(s, { type: 'tick' }, null).error, 'tick 的 playerId 是 null,必须放行');
+});
+
 test('猜者视图不含答案,画手视图含答案', () => {
   const s = drawState();
   const view = dg.serializeStateFor(s, guesserOf(s));

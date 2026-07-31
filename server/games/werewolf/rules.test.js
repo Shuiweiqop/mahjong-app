@@ -182,3 +182,21 @@ test('夜晚存活玩家不能公开发言', () => {
   const s = nightState(6);
   assert.ok(ww.applyAction(s, { type: 'chat', text: '天黑说话' }, s.players[0].id).error);
 });
+
+test('观战者不能行动 —— 尤其不能发言', () => {
+  // 观战者不在 alive 表里,chat 分支会把他当成死人路由进死人频道。
+  // 房主开了上帝视角的观战者能看到所有身份,那就等于可以把全场身份播给所有死者。
+  const s = nightState(6);
+  s.phase = 'day'; s.votes = {}; s.deadline = Date.now() + 60_000;
+
+  assert.ok(ww.applyAction(s, { type: 'chat', text: '狼是p3' }, '__spectator__').error);
+  assert.ok(ww.applyAction(s, { type: 'vote', target: s.players[0].id }, '__spectator__').error);
+
+  s.phase = 'night';
+  assert.ok(ww.applyAction(s, { type: 'wolf_kill', target: s.players[0].id }, '__spectator__').error);
+});
+
+test('tick 不受"必须是本局玩家"限制(服务端驱动,无行动者)', () => {
+  const s = nightState(6);
+  assert.ok(!ww.applyAction(s, { type: 'tick' }, null).error, 'tick 的 playerId 是 null,必须放行');
+});

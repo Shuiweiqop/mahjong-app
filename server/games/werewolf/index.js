@@ -211,6 +211,13 @@ function applyAction(s, action, playerId) {
   const events = [];
   const isAlive = s.alive[playerId];
 
+  // 观战者(及任何不在本局里的 id)不能行动。tick 由服务端驱动,playerId 为 null。
+  // 发言这一条尤其重要:观战者不在 alive 表里,会被当成死人路由进死人频道,
+  // 于是开了上帝视角的观战者可以把看到的身份直接播给所有死者。
+  if (action.type !== 'tick' && !(playerId in s.alive)) {
+    return { error: '你不是本局玩家' };
+  }
+
   switch (action.type) {
     case 'start': {
       if (playerId !== s.hostId) return { error: '只有房主能开始' };

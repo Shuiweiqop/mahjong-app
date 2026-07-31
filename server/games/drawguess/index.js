@@ -133,6 +133,14 @@ function endRound(state, reason) {
 function applyAction(state, action, playerId) {
   const events = [];
 
+  // 观战者(以及任何不在本局里的 id)不能行动。tick 是服务端驱动的,playerId 为 null。
+  // 不挡住的话观战者能"猜词":猜中会进 scores 与 guessedThisRound,而
+  // serializeStateFor 正是按 guessedThisRound 决定给不给 word —— 于是观战者
+  // 猜一次就把答案拿到手了,还能靠提前凑满"全员猜中"直接结束本轮。
+  if (action.type !== 'tick' && !state.players.some((p) => p.id === playerId)) {
+    return { error: '你不是本局玩家' };
+  }
+
   switch (action.type) {
     case 'start': {
       if (playerId !== state.hostId) return { error: '只有房主能开始' };
