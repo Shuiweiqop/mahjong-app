@@ -200,6 +200,87 @@ test('宽限期后真正出局:唯一的狼退出 → 好人胜', () => {
   assert.strictEqual(s.winner, 'good');
 });
 
+// ── 轮流发言 ──
+
+// 跑到白天发言阶段
+function speechPhase(n = 8) {
+  const s = ww.createInitialState(P(n), {});
+  ww.applyAction(s, { type: 'start' }, s.hostId);
+  s.players.forEach((p) => ww.applyAction(s, { type: 'ready' }, p.id));
+  const victim = s.players.map((p) => p.id).find((id) => s.roles[id] === 'villager' && s.alive[id]);
+  roleOf(s, 'wolf').forEach((w) => ww.applyAction(s, { type: 'wolf_kill', target: victim }, w));
+  const seer = roleOf(s, 'seer')[0];
+  if (s.phase === 'night' && seer) {
+    ww.applyAction(s, { type: 'seer_check', target: s.players.find((p) => p.id !== seer).id }, seer);
+  }
+  if (s.phase === 'witch') ww.applyAction(s, { type: 'witch' }, roleOf(s, 'witch')[0]);
+  return s;
+}
+
+test('夜晚结束后进入发言阶段,死者不在发言队列里', () => {
+  const s = speechPhase();
+  assert.strictEqual(s.phase, 'speech', '天亮后应先轮流发言,而不是直接投票');
+  assert.ok(s.speechOrder.length > 0);
+  assert.ok(s.speechOrder.every((id) => s.alive[id]), '死者不该出现在发言队列');
+});
+
+test('发言阶段只有当前发言人能说话', () => {
+  // 这是整个机制的核心:允许插话的话,狼刷屏就能把预言家的报点冲走。
+  const s = speechPhase();
+  const cur = s.speechOrder[s.speechIndex];
+  const other = s.speechOrder.find((id) => id !== cur);
+
+  assert.ok(!ww.applyAction(s, { type: 'chat', text: '我是预言家' }, cur).error, '当前发言人应能说话');
+  assert.ok(ww.applyAction(s, { type: 'chat', text: '刷屏' }, other).error, '其他人不该能插话');
+});
+
+test('过麦轮到下一位,别人不能替你过', () => {
+  const s = speechPhase();
+  const cur = s.speechOrder[s.speechIndex];
+  const other = s.speechOrder.find((id) => id !== cur);
+
+  assert.ok(ww.applyAction(s, { type: 'pass_speech' }, other).error, '不能替别人过麦');
+  ww.applyAction(s, { type: 'pass_speech' }, cur);
+  assert.strictEqual(s.speechOrder[s.speechIndex], s.speechOrder[1], '过麦后应轮到下一位');
+});
+
+test('发言超时自动轮到下一位', () => {
+  const s = speechPhase();
+  const before = s.speechIndex;
+  s.deadline = Date.now() - 1;
+  ww.applyAction(s, { type: 'tick' }, null);
+  assert.strictEqual(s.speechIndex, before + 1, '超时应换人,不能卡住');
+});
+
+test('全部发言完毕 → 进入投票,此时可自由讨论', () => {
+  const s = speechPhase();
+  let guard = 0;
+  while (s.phase === 'speech' && guard++ < 30) {
+    ww.applyAction(s, { type: 'pass_speech' }, s.speechOrder[s.speechIndex]);
+  }
+  assert.strictEqual(s.phase, 'day', '说完应进投票阶段');
+
+  const alive = s.players.map((p) => p.id).find((id) => s.alive[id]);
+  assert.ok(!ww.applyAction(s, { type: 'chat', text: '投票前再聊两句' }, alive).error,
+    '投票阶段应恢复自由讨论');
+});
+
+test('发言人掉线不会卡住全场', () => {
+  const s = speechPhase();
+  const cur = s.speechOrder[s.speechIndex];
+  ww.removePlayer(s, cur);
+  assert.notStrictEqual(s.speechOrder[s.speechIndex], cur, '发言人掉线应立即轮下一位');
+});
+
+test('死人频道不受发言顺序限制', () => {
+  // 死者在旁边聊天不影响场上发言,不该被"还没轮到你"挡住
+  const s = speechPhase();
+  const dead = s.players.map((p) => p.id).find((id) => !s.alive[id]);
+  const r = ww.applyAction(s, { type: 'chat', text: '死人观战吐槽' }, dead);
+  assert.ok(!r.error, '死者任何时候都能在死人频道说话');
+  assert.strictEqual(r.events[0].channel, 'dead');
+});
+
 // ── 女巫 ──
 
 // 造一个"狼刀已定、轮到女巫"的状态

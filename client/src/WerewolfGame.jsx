@@ -106,7 +106,7 @@ export default function WerewolfGame({ state, act, me, socket }) {
   }
 
   const phaseLabel = {
-    night: '🌙 夜晚', day: '☀️ 白天讨论 · 投票', pk: '⚔️ 平票 PK',
+    night: '🌙 夜晚', speech: '🎤 轮流发言', day: '☀️ 投票放逐', pk: '⚔️ 平票 PK',
     witch: '🧪 女巫用药', hunter: '🔫 猎人开枪',
   }[state.phase] || state.phase;
 
@@ -176,6 +176,8 @@ export default function WerewolfGame({ state, act, me, socket }) {
             <HunterShot state={state} act={act} nameOf={nameOf} alivePlayers={alivePlayers} />
           ) : !iAmAlive ? (
             <p style={{ color: 'var(--muted)', textAlign: 'center' }}>你已出局,静静观战…</p>
+          ) : state.phase === 'speech' ? (
+            <SpeechTurn state={state} act={act} nameOf={nameOf} />
           ) : state.phase === 'witch' ? (
             <WitchActions state={state} act={act} nameOf={nameOf} alivePlayers={alivePlayers} />
           ) : state.phase === 'night' ? (
@@ -209,6 +211,48 @@ export default function WerewolfGame({ state, act, me, socket }) {
           ))}
         </div>
       </div>
+    </div>
+  );
+}
+
+// 轮流发言。一次只有一个人能说,其余人只能看 —— 这样狼没法靠刷屏
+// 把预言家的报点冲走。轮到自己时用下方的聊天框发言,说完点"过"。
+function SpeechTurn({ state, act, nameOf }) {
+  const order = state.speechOrder || [];
+  const cur = state.currentSpeaker;
+
+  return (
+    <div>
+      <p style={{ marginBottom: 10, fontWeight: 700, textAlign: 'center' }}>
+        {state.iAmSpeaking ? '🎤 轮到你发言了' : `🎤 ${nameOf(cur)} 正在发言`}
+      </p>
+      <div style={{ fontSize: 13, color: 'var(--muted)', textAlign: 'center', marginBottom: 10 }}>
+        第 {(state.spokenCount ?? 0) + 1} / {state.speechTotal} 位
+      </div>
+
+      {/* 发言顺序一览:已说过的变淡,当前的高亮 */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, justifyContent: 'center', marginBottom: 10 }}>
+        {order.map((id, i) => (
+          <span key={id} style={{
+            ...ui.badge, fontSize: 12,
+            opacity: i < (state.spokenCount ?? 0) ? 0.4 : 1,
+            background: id === cur ? 'var(--accent)' : 'var(--surface-2)',
+            color: id === cur ? '#fff' : 'var(--text)',
+          }}>{nameOf(id)}</span>
+        ))}
+      </div>
+
+      {state.iAmSpeaking ? (
+        <>
+          <p style={{ fontSize: 13, color: 'var(--muted)', textAlign: 'center', marginBottom: 8 }}>
+            在下方聊天框发言,说完点"过"
+          </p>
+          <button style={{ ...ui.btnAccent, width: '100%' }}
+            onClick={() => act({ type: 'pass_speech' })}>过(结束发言)</button>
+        </>
+      ) : (
+        <WaitHint text="其他人发言中,请等待…" />
+      )}
     </div>
   );
 }
@@ -428,8 +472,12 @@ function PkVote({ state, act, nameOf }) {
 function ChatPanel({ state, act, messages, chatEndRef, isSpectator, iAmAlive }) {
   const [text, setText] = useState('');
   const dead = !isSpectator && iAmAlive === false;
-  const canSpeakPublic = iAmAlive && (state.phase === 'day' || state.phase === 'pk');
-  // 观战者不能发言(服务端会拒);死者可发死人频道;存活者仅白天/PK 可发。
+  // 发言阶段只有轮到的人能说;投票阶段(day/pk)大家自由讨论。
+  const canSpeakPublic = iAmAlive && (
+    state.phase === 'day' || state.phase === 'pk' ||
+    (state.phase === 'speech' && state.iAmSpeaking)
+  );
+  // 观战者不能发言(服务端会拒);死者可发死人频道;存活者按上面的规则。
   const canSend = !isSpectator && (dead || canSpeakPublic);
   const send = () => {
     const t = text.trim();
@@ -469,7 +517,9 @@ function ChatPanel({ state, act, messages, chatEndRef, isSpectator, iAmAlive }) 
       ) : (
         <p style={{ color: 'var(--muted)', fontSize: 13, margin: 0 }}>
           {isSpectator ? '观战中,仅可查看讨论'
-            : state.phase === 'night' ? '🌙 夜晚不能公开发言' : '当前不能发言'}
+            : state.phase === 'night' ? '🌙 夜晚不能公开发言'
+            : state.phase === 'speech' ? '🎤 轮流发言中,等待轮到你…'
+            : '当前不能发言'}
         </p>
       )}
     </div>

@@ -36,7 +36,8 @@ function godCountFor(n) {
 // 各阶段超时(秒)。到点由服务端计时器(tick)兜底推进,避免有人掉线/发呆时死锁。
 const REVEAL_SECONDS = 30;  // 身份揭晓:等所有人点"进入游戏";此宽限超时只为防有人不点而卡住
 const NIGHT_SECONDS = 40;   // 夜晚:狼人选刀 + 预言家查验
-const DAY_SECONDS = 60;     // 白天:讨论 + 投票放逐(时间内可随时改票,到点结算)
+const DAY_SECONDS = 60;     // 投票阶段:可随时改票,到点结算
+const SPEECH_SECONDS = 45;  // 单人发言时限;说完点"过"或超时自动轮下一个
 const DAY_HURRY_SECONDS = 5; // 白天全员投完后,把倒计时压到这么短 —— 留个改票窗口,不立即结算
 const PK_SECONDS = 30;      // 平票PK:平票者进入 PK,非平票的存活玩家重投一轮
 const WITCH_SECONDS = 25;   // 女巫用药:狼刀结算后单独一段(她要先看到刀口)
@@ -92,6 +93,8 @@ function createInitialState(players, config = {}) {
     hunterCanShoot: true,
     pendingHunter: null,                  // 待开枪的猎人 id;非 hunter 阶段为 null
     votes: {},                            // 白天投票:{ voterId: targetId|null }(可改票)
+    speechOrder: null,                    // 发言队列 [playerId];非 speech 阶段为 null
+    speechIndex: 0,                       // 当前轮到队列里的第几个
     pkCandidates: null,                   // PK 加赛的候选人 [id,id];非 PK 阶段为 null
     ready: {},                            // 身份揭晓:已点"进入游戏"的玩家 { playerId: true }
     deadline: null,                       // 当前阶段截止时间戳(ms);到点由 tick 兜底推进
@@ -197,11 +200,62 @@ function enterHunterTurn(s) {
   s.log.push({ type: 'hunter_turn', playerId: s.pendingHunter });
 }
 
-// 进入白天(讨论 + 投票同阶段):一进来即开放投票并倒计时。
+// 进入白天发言:按座位轮流,一次只有一个人能说,其余人只能看。
+//
+// 这是狼人杀的核心机制,不是锦上添花 —— 悍跳、对跳、聊爆狼全建立在"轮流发言"上。
+// 允许同时刷屏的话,狼只要疯狂刷屏就能把预言家的报点冲走,变成谁打字快谁赢。
+//
+// 顺序从"上一个死者的下一位"开始(线下惯例:死者下家先发言),死者不在队列里。
+// 全部说完 → 进投票。
+function enterSpeech(s) {
+  const order = aliveIds(s);
+  if (!order.length) { enterDay(s); return; }
+
+  // 起点:上一个出局者在原始座位里的下一位;没有死者(首日)就从 0 开始
+  const seats = s.players.map((p) => p.id);
+  const lastDead = Array.isArray(s.lastNightVictim) ? s.lastNightVictim[0] : s.lastNightVictim;
+  let start = 0;
+  if (lastDead) {
+    const seat = seats.indexOf(lastDead);
+    if (seat >= 0) {
+      for (let i = 1; i <= seats.length; i++) {
+        const idx = order.indexOf(seats[(seat + i) % seats.length]);
+        if (idx >= 0) { start = idx; break; }
+      }
+    }
+  }
+
+  s.phase = 'speech';
+  s.speechOrder = [...order.slice(start), ...order.slice(0, start)];
+  s.speechIndex = 0;
+  setDeadline(s, SPEECH_SECONDS);
+  s.log.push({ type: 'phase', phase: 'speech', round: s.round, order: s.speechOrder });
+}
+
+// 轮到下一位发言;都说完了就进投票。
+// 掉线/已出局的人自动跳过 —— 否则全场要为一个不会说话的人干等满 45 秒。
+function nextSpeaker(s) {
+  for (let i = s.speechIndex + 1; i < s.speechOrder.length; i++) {
+    const id = s.speechOrder[i];
+    if (s.alive[id] && !s.absent[id]) {
+      s.speechIndex = i;
+      setDeadline(s, SPEECH_SECONDS);
+      return;
+    }
+  }
+  enterDay(s);
+}
+
+const currentSpeaker = (s) =>
+  s.phase === 'speech' ? ((s.speechOrder || [])[s.speechIndex] ?? null) : null;
+
+// 进入投票阶段:发言已经结束,这里只投票。
 // 玩家可在时间内随时改票;到点(tick)或全员投完即结算。
 function enterDay(s) {
   s.phase = 'day';
   s.votes = {};
+  s.speechOrder = null;
+  s.speechIndex = 0;
   setDeadline(s, DAY_SECONDS);
   s.log.push({ type: 'phase', phase: 'day', round: s.round });
 }
@@ -243,9 +297,9 @@ function finishNight(s) {
   s.nightActions.victim = null;
 
   if (checkWin(s)) return;
-  // 猎人被刀/被毒(非毒)时先让他开枪,再进白天
+  // 猎人被刀时先让他开枪,再进白天发言
   if (hunterTriggered) { s.resumeTo = 'day'; enterHunterTurn(s); return; }
-  enterDay(s);
+  enterSpeech(s);
 }
 
 // 数票:返回得票最高者。max 为最高票数,leaders 为并列最高的所有人(可能 1 个或多个)。
@@ -276,7 +330,9 @@ function resumeAfterHunter(s) {
   s.pendingHunter = null;
   s.resumeTo = null;
   if (checkWin(s)) return;
-  if (to === 'night') enterNight(s); else enterDay(s);
+  // 回白天时要回到"发言"而不是直接投票 —— 猎人的枪响本身就是重要信息,
+  // 大家需要在发言里消化它。
+  if (to === 'night') enterNight(s); else enterSpeech(s);
 }
 
 // 结算白天投票:
@@ -395,6 +451,14 @@ function applyAction(s, action, playerId) {
       return { state: s, events };
     }
 
+    // 结束自己的发言("过")。只有当前发言人能过,防止别人替他跳过。
+    case 'pass_speech': {
+      if (s.phase !== 'speech') return { error: '非发言阶段' };
+      if (playerId !== currentSpeaker(s)) return { error: '现在不是你发言' };
+      nextSpeaker(s);
+      return { state: s, events };
+    }
+
     // 猎人开枪:出局瞬间带走一名存活玩家。target 为 null 表示放弃。
     case 'hunter_shoot': {
       if (s.phase !== 'hunter') return { error: '非猎人开枪阶段' };
@@ -442,7 +506,13 @@ function applyAction(s, action, playerId) {
       const text = String(action.text || '').trim().slice(0, CHAT_MAX);
       if (!text) return { state: s, events };
       if (isAlive) {
-        if (s.phase !== 'day' && s.phase !== 'pk') return { error: '现在还不能公开发言' };
+        // 发言阶段:只有当前发言人能说。这是整个机制的关键 ——
+        // 少了这道校验,狼就能在别人发言时刷屏把报点冲走。
+        if (s.phase === 'speech') {
+          if (playerId !== currentSpeaker(s)) return { error: '还没轮到你发言' };
+        } else if (s.phase !== 'day' && s.phase !== 'pk') {
+          return { error: '现在还不能公开发言' };
+        }
         events.push({ type: 'chat', channel: 'alive', playerId, text });
       } else {
         events.push({ type: 'chat', channel: 'dead', playerId, text });
@@ -467,6 +537,9 @@ function applyAction(s, action, playerId) {
         // 猎人没开枪 → 视为放弃
         s.hunterCanShoot = false;
         resumeAfterHunter(s);
+      } else if (s.phase === 'speech') {
+        // 发言超时 → 自动轮到下一位(线下也是这样,时间到就换人)
+        nextSpeaker(s);
       } else if (s.phase === 'day') {
         // 到点结算:未投的算弃票,平票视配置进 PK 或无人出局
         resolveVote(s);
@@ -534,6 +607,9 @@ function removePlayer(s, playerId) {
     enterNight(s);
   } else if (s.phase === 'night') {
     maybeResolveNight(s);
+  } else if (s.phase === 'speech' && playerId === currentSpeaker(s)) {
+    // 正在发言的人掉线 → 直接轮下一个,不让全场等满他的 45 秒
+    nextSpeaker(s);
   } else if (s.phase === 'witch' && s.roles[playerId] === ROLE.WITCH) {
     // 全场都在等女巫,她掉线了 → 视为跳过,别让所有人干等到超时
     s.nightActions.witch = s.nightActions.witch || {};
@@ -560,6 +636,9 @@ function eliminatePlayer(s, playerId) {
     enterNight(s);
   } else if (s.phase === 'night') {
     maybeResolveNight(s);
+  } else if (s.phase === 'speech' && playerId === currentSpeaker(s)) {
+    // 正在发言的人掉线 → 直接轮下一个,不让全场等满他的 45 秒
+    nextSpeaker(s);
   } else if (s.phase === 'witch' && s.roles[playerId] === ROLE.WITCH) {
     s.nightActions.witch = s.nightActions.witch || {};
     finishNight(s);
@@ -658,7 +737,15 @@ function serializeStateFor(s, playerId) {
     if (myRole === ROLE.WOLF) view.iActed = playerId in (s.nightActions.wolfTargetVotes || {});
     else if (myRole === ROLE.SEER) view.iActed = s.nightActions.seerCheck != null;
   }
-  // 白天/PK(讨论+投票):公开当前票型(谁投了谁)供讨论;并标记本人当前票与是否已投
+  // 发言阶段:谁在说、还有谁没说,都是公开信息(线下所有人都看得见轮到谁)
+  if (s.phase === 'speech') {
+    view.speechOrder = s.speechOrder;
+    view.currentSpeaker = currentSpeaker(s);
+    view.iAmSpeaking = playerId === view.currentSpeaker;
+    view.spokenCount = s.speechIndex;
+    view.speechTotal = (s.speechOrder || []).length;
+  }
+  // 白天/PK(投票):公开当前票型(谁投了谁);并标记本人当前票与是否已投
   if (s.phase === 'day' || s.phase === 'pk') {
     view.votes = s.votes;
     view.iVoted = playerId in s.votes;
