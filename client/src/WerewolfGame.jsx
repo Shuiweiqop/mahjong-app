@@ -55,6 +55,13 @@ export default function WerewolfGame({ state, act, me, socket }) {
   // ── 聊天/发言 ──(钩子必须在任何条件 return 之前)
   // 订阅 chat 事件:channel='dead' 的死人频道消息只会发到死者/观战者(服务端已按频道路由)。
   const [messages, setMessages] = useState([]);
+  // 遇害动画:天亮进入发言阶段的那一刻放一次,放完就不再重复。
+  // 用 round 做键 —— 同一轮内的任何状态广播都不该重放动画。
+  const [slashRound, setSlashRound] = useState(null);
+  const victims = Array.isArray(state.lastNightVictim)
+    ? state.lastNightVictim
+    : state.lastNightVictim ? [state.lastNightVictim] : [];
+  const showSlash = state.phase === 'speech' && victims.length > 0 && slashRound !== state.round;
   const chatEndRef = useRef(null);
   const membersRef = useRef(players);
   useEffect(() => { membersRef.current = players; });
@@ -169,6 +176,21 @@ export default function WerewolfGame({ state, act, me, socket }) {
             )}
           </div>
 
+          {/* 遇害动画:天亮那一刻放一次。所有人都该看到(包括观战者和死者),
+              这是公开的夜晚结果,不是分角色信息。 */}
+          {showSlash && (
+            <div style={{ marginBottom: 12 }}>
+              {victims.map((id) => (
+                <SlashReveal key={id} name={nameOf(id)}
+                  role={state.roles?.[id] ?? godRoles?.[id]}
+                  onDone={() => setSlashRound(state.round)} />
+              ))}
+              <p style={{ textAlign: 'center', color: 'var(--danger)', fontWeight: 700 }}>
+                🔪 {victims.map(nameOf).join('、')} 倒牌了
+              </p>
+            </div>
+          )}
+
           {/* 行动区。猎人的开枪要放在"已出局"判断之前 —— 他正是因为死了才要开枪。 */}
           {isSpectator ? (
             <p style={{ color: 'var(--muted)', textAlign: 'center' }}>👀 观战中,无法参与行动</p>
@@ -211,6 +233,75 @@ export default function WerewolfGame({ state, act, me, socket }) {
           ))}
         </div>
       </div>
+    </div>
+  );
+}
+
+// 夜里可能死多个人(狼刀 + 女巫毒),所以 lastNightVictim 是数组。
+// 早期版本它是单个 id,直接丢给 nameOf 会得到"玩家",看不出是谁死了。
+function victimNames(victim, nameOf) {
+  const ids = Array.isArray(victim) ? victim : victim ? [victim] : [];
+  if (!ids.length) return null;
+  return `昨晚 ${ids.map(nameOf).join('、')} 遇害了`;
+}
+
+// 遇害动画:匕首斜划过牌面,牌被切成两半错开滑落。
+// 纯 CSS + clip-path —— 上下两半是同一张牌渲染两遍,各自裁掉一半,
+// 然后往相反方向滑走。不需要任何动画库。
+//
+// 尊重 prefers-reduced-motion:关掉动效的用户直接看到结果,不做切割动画。
+function SlashReveal({ name, role, onDone }) {
+  const [stage, setStage] = useState('idle');   // idle → slash → split → done
+  useEffect(() => {
+    const t1 = setTimeout(() => setStage('slash'), 200);
+    const t2 = setTimeout(() => setStage('split'), 700);
+    const t3 = setTimeout(() => { setStage('done'); onDone?.(); }, 2200);
+    return () => { clearTimeout(t1); clearTimeout(t2); clearTimeout(t3); };
+  }, [onDone]);
+
+  if (stage === 'done') return null;
+  const info = ROLE_INFO[role];
+
+  // 牌面内容(上下半各渲染一次)
+  const face = (
+    <div style={{
+      display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+      width: '100%', height: '100%', gap: 6,
+      background: 'var(--surface-2)', border: '2px solid var(--border)', borderRadius: 12,
+    }}>
+      <div style={{ fontSize: 38 }}>{info?.emoji ?? '🙂'}</div>
+      <div style={{ fontWeight: 800, fontSize: 17 }}>{name}</div>
+      {info && <div style={{ fontSize: 13, color: 'var(--muted)' }}>{info.name}</div>}
+    </div>
+  );
+
+  const split = stage === 'split';
+  const half = (which) => ({
+    position: 'absolute', inset: 0,
+    // 沿对角线裁切:上半保留左上,下半保留右下
+    clipPath: which === 'top'
+      ? 'polygon(0 0, 100% 0, 100% 38%, 0 74%)'
+      : 'polygon(0 74%, 100% 38%, 100% 100%, 0 100%)',
+    transform: split
+      ? (which === 'top' ? 'translate(-14px,-18px) rotate(-5deg)' : 'translate(14px,20px) rotate(5deg)')
+      : 'none',
+    opacity: split ? 0 : 1,
+    transition: 'transform 1.1s cubic-bezier(0.2,0.7,0.3,1), opacity 1.1s ease-in',
+  });
+
+  return (
+    <div className="slash-wrap" style={{
+      position: 'relative', width: 190, height: 150, margin: '0 auto 12px',
+    }}>
+      <div style={half('top')}>{face}</div>
+      <div style={half('bottom')}>{face}</div>
+      {/* 刀光:一道细白光沿对角线扫过 */}
+      {stage !== 'idle' && (
+        <div className="slash-blade" style={{
+          position: 'absolute', inset: -20, pointerEvents: 'none',
+          background: 'linear-gradient(108deg, transparent 44%, #fff 49%, #ffd9d9 50%, transparent 56%)',
+        }} />
+      )}
     </div>
   );
 }
@@ -387,8 +478,7 @@ function DayVote({ state, act, me, alivePlayers, nameOf }) {
   return (
     <div>
       <p style={{ marginBottom: 6, textAlign: 'center' }}>
-        {state.lastNightVictim
-          ? `昨晚 ${nameOf(state.lastNightVictim)} 遇害了` : '昨晚是平安夜,无人死亡'}
+        {victimNames(state.lastNightVictim, nameOf) || '昨晚是平安夜,无人死亡'}
       </p>
       <p style={{ color: 'var(--muted)', fontSize: 13, marginBottom: 12, textAlign: 'center' }}>
         讨论并投票放逐一名玩家 · 时间内可改票 · 全员投完后加速结算

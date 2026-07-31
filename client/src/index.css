@@ -52,3 +52,30 @@ input {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.3; }
 }
+
+/* 遇害动画的刀光:一道白光沿对角线扫过牌面,扫完即隐。
+   配合 WerewolfGame 的 SlashReveal —— 牌被切成两半后错开滑落。 */
+@keyframes bladeSweep {
+  0%   { transform: translate(-130%, -130%); opacity: 0; }
+  35%  { opacity: 1; }
+  100% { transform: translate(130%, 130%); opacity: 0; }
+}
+.slash-blade {
+  animation: bladeSweep 0.55s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+  mix-blend-mode: screen;
+}
+/* 被切开的瞬间整块抖一下,强化"被砍中"的手感 */
+@keyframes slashShake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-4px); }
+  75% { transform: translateX(4px); }
+}
+.slash-wrap { animation: slashShake 0.25s ease-in-out 0.2s; }
+
+/* 系统开启"减弱动态效果"时,不做位移/闪光类动画 —— 对前庭敏感的用户
+   这类效果会引起不适。结果照常显示,只是不animate。 */
+@media (prefers-reduced-motion: reduce) {
+  .slash-blade { animation: none; opacity: 0; }
+  .slash-wrap { animation: none; }
+  .slash-wrap * { transition: none !important; }
+}
