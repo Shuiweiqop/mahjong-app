@@ -61,7 +61,12 @@ export default function WerewolfGame({ state, act, me, socket }) {
   const victims = Array.isArray(state.lastNightVictim)
     ? state.lastNightVictim
     : state.lastNightVictim ? [state.lastNightVictim] : [];
-  const showSlash = state.phase === 'speech' && victims.length > 0 && slashRound !== state.round;
+  // 天亮时放一次夜晚结果动画。有人死 → 斜切;没人死 → 刀被挡下。
+  // 注意"平安夜"和"被女巫救了"在前端看起来必须完全一样 —— 服务端也确实
+  // 只发 lastNightVictim=null。能区分的话就等于泄露了女巫用没用解药。
+  const showNightResult = state.phase === 'speech' && slashRound !== state.round;
+  const showSlash = showNightResult && victims.length > 0;
+  const showBlocked = showNightResult && victims.length === 0 && state.round > 0;
   const chatEndRef = useRef(null);
   const membersRef = useRef(players);
   useEffect(() => { membersRef.current = players; });
@@ -182,11 +187,26 @@ export default function WerewolfGame({ state, act, me, socket }) {
             <div style={{ marginBottom: 12 }}>
               {victims.map((id) => (
                 <SlashReveal key={id} name={nameOf(id)}
-                  role={state.roles?.[id] ?? godRoles?.[id]}
+                  // 只在观战上帝视角下显示身份。不要写成 state.roles?.[id] ——
+                  // 那样一旦服务端将来在对局中下发 roles(比如为了某个新功能),
+                  // 这里就会跟着把死者身份暴露给全场,而且没有任何东西会报错。
+                  // 显示什么由"我有没有资格看"决定,不由"字段在不在"决定。
+                  role={godRoles?.[id]}
                   onDone={() => setSlashRound(state.round)} />
               ))}
               <p style={{ textAlign: 'center', color: 'var(--danger)', fontWeight: 700 }}>
                 🔪 {victims.map(nameOf).join('、')} 倒牌了
+              </p>
+            </div>
+          )}
+
+          {/* 平安夜:刀被挡下。文案刻意只说"无人倒牌",不区分空刀还是被救 ——
+              区分的话就暴露了女巫有没有用解药。 */}
+          {showBlocked && (
+            <div style={{ marginBottom: 12 }}>
+              <BlockedReveal onDone={() => setSlashRound(state.round)} />
+              <p style={{ textAlign: 'center', color: 'var(--accent)', fontWeight: 700 }}>
+                🛡️ 昨晚是平安夜
               </p>
             </div>
           )}
@@ -302,6 +322,50 @@ function SlashReveal({ name, role, onDone }) {
           background: 'linear-gradient(108deg, transparent 44%, #fff 49%, #ffd9d9 50%, transparent 56%)',
         }} />
       )}
+    </div>
+  );
+}
+
+// 平安夜:刀光斜劈下来,撞上一面盾牌弹开、碎裂。
+//
+// 这个动画对"狼空刀"和"女巫用解药救了人"必须表现得一模一样 —— 服务端
+// 本来就只发 lastNightVictim=null,前端要是能区分,就等于告诉所有人
+// 女巫今晚用没用药,解药的价值直接归零。
+function BlockedReveal({ onDone }) {
+  const [stage, setStage] = useState('idle');   // idle → clash → done
+  useEffect(() => {
+    const t1 = setTimeout(() => setStage('clash'), 200);
+    const t2 = setTimeout(() => { setStage('done'); onDone?.(); }, 1900);
+    return () => { clearTimeout(t1); clearTimeout(t2); };
+  }, [onDone]);
+
+  if (stage === 'done') return null;
+  const clash = stage === 'clash';
+
+  return (
+    <div style={{ position: 'relative', width: 190, height: 150, margin: '0 auto 12px' }}>
+      <div className={clash ? 'block-shield' : undefined} style={{
+        position: 'absolute', inset: 0,
+        display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 6,
+        background: 'var(--surface-2)', border: '2px solid var(--accent)', borderRadius: 12,
+      }}>
+        <div style={{ fontSize: 38 }}>🛡️</div>
+        <div style={{ fontWeight: 800, fontSize: 16 }}>无人倒牌</div>
+      </div>
+      {/* 刀光斜劈下来,到中途被挡住(只扫一半就停) */}
+      {clash && (
+        <div className="block-blade" style={{
+          position: 'absolute', inset: -20, pointerEvents: 'none',
+          background: 'linear-gradient(108deg, transparent 44%, #fff 49%, #d9e6ff 50%, transparent 56%)',
+        }} />
+      )}
+      {/* 撞击迸出的火花 */}
+      {clash && <div className="block-spark" style={{
+        position: 'absolute', left: '50%', top: '50%', width: 10, height: 10,
+        marginLeft: -5, marginTop: -5, borderRadius: '50%',
+        background: 'radial-gradient(circle, #fff 0%, #ffd76a 45%, transparent 70%)',
+        pointerEvents: 'none',
+      }} />}
     </div>
   );
 }

@@ -72,10 +72,39 @@ input {
 }
 .slash-wrap { animation: slashShake 0.25s ease-in-out 0.2s; }
 
+/* 平安夜:刀光劈到一半被盾牌挡下 —— 扫到中间就停住并回弹。
+   和 bladeSweep 的区别只在于它不会扫过去。 */
+@keyframes bladeBlocked {
+  0%   { transform: translate(-130%, -130%); opacity: 0; }
+  40%  { transform: translate(-10%, -10%); opacity: 1; }
+  55%  { transform: translate(0, 0); opacity: 1; }
+  70%  { transform: translate(-25%, -25%); opacity: 0.8; }   /* 被弹开 */
+  100% { transform: translate(-60%, -60%); opacity: 0; }
+}
+.block-blade {
+  animation: bladeBlocked 0.9s cubic-bezier(0.3, 0, 0.4, 1) forwards;
+  mix-blend-mode: screen;
+}
+/* 撞击瞬间迸出的火花 */
+@keyframes sparkBurst {
+  0%   { transform: scale(0); opacity: 0; }
+  45%  { transform: scale(0); opacity: 0; }
+  60%  { transform: scale(6); opacity: 1; }
+  100% { transform: scale(11); opacity: 0; }
+}
+.block-spark { animation: sparkBurst 0.9s ease-out forwards; }
+/* 盾牌被磕了一下 */
+@keyframes shieldBrace {
+  0%, 100% { transform: scale(1); }
+  58% { transform: scale(0.94); }
+  72% { transform: scale(1.03); }
+}
+.block-shield { animation: shieldBrace 0.9s ease-out; }
+
 /* 系统开启"减弱动态效果"时,不做位移/闪光类动画 —— 对前庭敏感的用户
    这类效果会引起不适。结果照常显示,只是不animate。 */
 @media (prefers-reduced-motion: reduce) {
-  .slash-blade { animation: none; opacity: 0; }
-  .slash-wrap { animation: none; }
+  .slash-blade, .block-blade, .block-spark { animation: none; opacity: 0; }
+  .slash-wrap, .block-shield { animation: none; }
   .slash-wrap * { transition: none !important; }
 }

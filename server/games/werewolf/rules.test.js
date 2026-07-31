@@ -200,6 +200,52 @@ test('宽限期后真正出局:唯一的狼退出 → 好人胜', () => {
   assert.strictEqual(s.winner, 'good');
 });
 
+// ── 夜晚结果的信息量 ──
+
+test('对局中不下发 roles —— 死者身份不能随夜晚结果泄露', () => {
+  // 前端的遇害动画会显示死者的牌。它必须只在观战上帝视角下显示身份,
+  // 但服务端这一层也要守住:对局中任何玩家视图都不该出现 roles。
+  const s = speechPhase();
+  for (const p of s.players) {
+    assert.strictEqual(
+      ww.serializeStateFor(s, p.id).roles, undefined,
+      `${p.id} 在对局中拿到了 roles`
+    );
+  }
+});
+
+test('"被女巫救了"和"狼空刀"在玩家视图里必须完全一样', () => {
+  // 能区分的话就等于公开了女巫今晚有没有用解药,解药的价值直接归零。
+  // 前端的平安夜动画也因此只能说"无人倒牌",不能说"有人被救了"。
+  const mk = (useHeal) => {
+    const s = ww.createInitialState(P(8), {});
+    ww.applyAction(s, { type: 'start' }, s.hostId);
+    s.players.forEach((p) => ww.applyAction(s, { type: 'ready' }, p.id));
+    const victim = s.players.map((p) => p.id).find((id) => s.roles[id] === 'villager' && s.alive[id]);
+    roleOf(s, 'wolf').forEach((w) => ww.applyAction(s, { type: 'wolf_kill', target: victim }, w));
+    const seer = roleOf(s, 'seer')[0];
+    if (s.phase === 'night' && seer) {
+      ww.applyAction(s, { type: 'seer_check', target: s.players.find((p) => p.id !== seer).id }, seer);
+    }
+    // useHeal: 救下刀口 → 无人死;否则狼空刀的等价局面(也无人死)
+    ww.applyAction(s, useHeal ? { type: 'witch', heal: true } : { type: 'witch' }, roleOf(s, 'witch')[0]);
+    return { s, victim };
+  };
+
+  const saved = mk(true);
+  assert.strictEqual(saved.s.alive[saved.victim], true, '前置条件:解药应救下刀口');
+
+  // 找一个既不是女巫也不是刀口的旁观者
+  const observer = saved.s.players
+    .map((p) => p.id)
+    .find((id) => saved.s.roles[id] !== 'witch' && id !== saved.victim);
+  const view = ww.serializeStateFor(saved.s, observer);
+
+  assert.strictEqual(view.lastNightVictim, null, '被救下时对外就是"无人死亡"');
+  assert.strictEqual(view.potions, undefined, '药瓶剩余量只能给女巫本人');
+  assert.strictEqual(view.witchVictim, undefined, '刀口只能给女巫本人');
+});
+
 // ── 房主配置(阶段时长) ──
 
 test('房主设置的阶段时长真的生效', () => {
