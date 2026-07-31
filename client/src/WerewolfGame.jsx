@@ -1,10 +1,11 @@
-import { useEffect, useReducer } from 'react';
+import { useEffect, useReducer, useRef, useState } from 'react';
 import RoleReveal from './RoleReveal';
 import { ui } from './ui';
 
 // 狼人杀游戏界面(对局中)。
-// props: state(分角色视图), act(action=>void), me{id,name}
-// state.phase: night | day | ended  (白天=讨论与投票同阶段,有倒计时)
+// props: state(分角色视图), act(action=>void), me{id,name}, socket(ref,用于订阅聊天事件)
+// state.phase: reveal | night | day | pk | ended
+//   day/pk = 讨论 + 投票(有倒计时);pk = 平票加赛(仅非候选者可投候选人之一)
 const ROLE_INFO = {
   wolf: { emoji: '🐺', name: '狼人', desc: '夜晚与同伴一起猎杀一名玩家' },
   seer: { emoji: '🔮', name: '预言家', desc: '每晚查验一名玩家的身份' },
@@ -38,7 +39,7 @@ function Countdown({ deadline }) {
 }
 const remain = (deadline) => deadline == null ? 0 : Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
 
-export default function WerewolfGame({ state, act, me }) {
+export default function WerewolfGame({ state, act, me, socket }) {
   const players = state.players || [];
   const nameOf = (id) => players.find((p) => p.id === id)?.name || '玩家';
   const role = ROLE_INFO[state.myRole] || ROLE_INFO.villager;
@@ -48,6 +49,23 @@ export default function WerewolfGame({ state, act, me }) {
   const alivePlayers = players.filter((p) => p.alive);
   // 上帝视角(房主开启)下,观战者可见每个人的角色
   const godRoles = isSpectator && state.roles ? state.roles : null;
+
+  // ── 聊天/发言 ──(钩子必须在任何条件 return 之前)
+  // 订阅 chat 事件:channel='dead' 的死人频道消息只会发到死者/观战者(服务端已按频道路由)。
+  const [messages, setMessages] = useState([]);
+  const chatEndRef = useRef(null);
+  const membersRef = useRef(players);
+  useEffect(() => { membersRef.current = players; });
+  useEffect(() => {
+    const s = socket?.current;
+    if (!s) return;
+    const nm = (id) => membersRef.current.find((p) => p.id === id)?.name || '玩家';
+    const onChat = ({ playerId, text, channel }) =>
+      setMessages((m) => [...m.slice(-60), { id: Math.random(), name: nm(playerId), text, channel }]);
+    s.on('chat', onChat);
+    return () => s.off('chat', onChat);
+  }, [socket]);
+  useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
 
   // 身份序幕:仅在服务端 reveal 阶段显示(此阶段夜晚尚未计时)。
   // 点"进入游戏"→ 发 ready;等所有存活玩家就绪(或宽限超时),服务端推进到 night,序幕自然消失。
@@ -85,7 +103,7 @@ export default function WerewolfGame({ state, act, me }) {
     );
   }
 
-  const phaseLabel = { night: '🌙 夜晚', day: '☀️ 白天讨论 · 投票' }[state.phase] || state.phase;
+  const phaseLabel = { night: '🌙 夜晚', day: '☀️ 白天讨论 · 投票', pk: '⚔️ 平票 PK' }[state.phase] || state.phase;
 
   return (
     <div>
@@ -145,7 +163,15 @@ export default function WerewolfGame({ state, act, me }) {
             <NightActions state={state} act={act} me={me} alivePlayers={alivePlayers} />
           ) : state.phase === 'day' ? (
             <DayVote state={state} act={act} me={me} alivePlayers={alivePlayers} nameOf={nameOf} />
+          ) : state.phase === 'pk' ? (
+            <PkVote state={state} act={act} nameOf={nameOf} />
           ) : null}
+
+          {/* 讨论区:存活者白天/PK 可公开发言;死者/观战者走死人频道。夜晚存活者禁言。 */}
+          <ChatPanel
+            state={state} act={act} messages={messages} chatEndRef={chatEndRef}
+            isSpectator={isSpectator} iAmAlive={iAmAlive}
+          />
         </div>
 
         {/* 右:玩家列表 */}
@@ -216,7 +242,8 @@ function DayVote({ state, act, me, alivePlayers, nameOf }) {
           ? `昨晚 ${nameOf(state.lastNightVictim)} 遇害了` : '昨晚是平安夜,无人死亡'}
       </p>
       <p style={{ color: 'var(--muted)', fontSize: 13, marginBottom: 12, textAlign: 'center' }}>
-        讨论并投票放逐一名玩家 · 时间内可改票 · 全员投完后加速结算(平票无人出局)
+        讨论并投票放逐一名玩家 · 时间内可改票 · 全员投完后加速结算
+        {state.cfg?.tiePk ? '(平票进入 PK 加赛)' : '(平票无人出局)'}
       </p>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         {candidates.map((p) => {
@@ -239,6 +266,105 @@ function DayVote({ state, act, me, alivePlayers, nameOf }) {
       {state.dayAllVoted && (
         <p style={{ color: 'var(--accent)', fontSize: 13, marginTop: 10, textAlign: 'center' }}>
           ✓ 全员已投,即将结算 · 仍可改票
+        </p>
+      )}
+    </div>
+  );
+}
+
+// PK 加赛:平票者成为候选。候选人本轮不投票(等裁决);其余存活玩家只能在候选人之间二选一(或弃票)。
+function PkVote({ state, act, nameOf }) {
+  const cands = state.pkCandidates || [];
+  const iAmCand = state.iAmPkCandidate;
+  const myVote = state.myVote;
+  const voted = state.iVoted;
+  return (
+    <div>
+      <p style={{ marginBottom: 6, textAlign: 'center', fontWeight: 800, color: 'var(--danger)' }}>
+        ⚔️ 平票 PK:{cands.map(nameOf).join(' vs ')}
+      </p>
+      <p style={{ color: 'var(--muted)', fontSize: 13, marginBottom: 12, textAlign: 'center' }}>
+        {iAmCand
+          ? '你是 PK 候选人 —— 为自己辩护,由其余玩家裁决'
+          : '在候选人之间二选一 · 再次平票则无人出局'}
+      </p>
+      {iAmCand ? (
+        <WaitHint text="⚔️ 等待其余玩家投票裁决…" />
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {cands.map((id) => {
+            const picked = myVote === id;
+            return (
+              <button key={id}
+                style={{ ...ui.btnGhost, ...(picked ? { borderColor: 'var(--accent)', color: 'var(--accent)', fontWeight: 800 } : {}) }}
+                onClick={() => act({ type: 'pk_vote', target: id })}>
+                {picked ? '✓ ' : ''}投 {nameOf(id)}
+              </button>
+            );
+          })}
+          <button
+            style={{ ...ui.btnGhost, color: 'var(--muted)', ...(voted && myVote == null ? { borderColor: 'var(--accent)' } : {}) }}
+            onClick={() => act({ type: 'pk_vote', target: null })}>
+            {voted && myVote == null ? '✓ ' : ''}弃票
+          </button>
+        </div>
+      )}
+      {state.dayAllVoted && (
+        <p style={{ color: 'var(--accent)', fontSize: 13, marginTop: 10, textAlign: 'center' }}>
+          ✓ 全员已投,即将裁决 · 仍可改票
+        </p>
+      )}
+    </div>
+  );
+}
+
+// 讨论区。存活者:白天/PK 可公开发言(夜晚禁言);死者/观战者:走死人频道(仅死者+观战者可见)。
+// 发言权限与服务端一致 —— 服务端才是权威,这里只是不给不能发言的人显示输入框。
+function ChatPanel({ state, act, messages, chatEndRef, isSpectator, iAmAlive }) {
+  const [text, setText] = useState('');
+  const dead = !isSpectator && iAmAlive === false;
+  const canSpeakPublic = iAmAlive && (state.phase === 'day' || state.phase === 'pk');
+  // 观战者不能发言(服务端会拒);死者可发死人频道;存活者仅白天/PK 可发。
+  const canSend = !isSpectator && (dead || canSpeakPublic);
+  const send = () => {
+    const t = text.trim();
+    if (!t) return;
+    act({ type: 'chat', text: t });
+    setText('');
+  };
+  return (
+    <div style={{ marginTop: 16, borderTop: '1px solid var(--border)', paddingTop: 12 }}>
+      <label style={ui.label}>
+        💬 讨论{dead ? ' · 死人频道(存活玩家看不到)' : ''}
+      </label>
+      <div style={{ maxHeight: 180, overflowY: 'auto', display: 'flex', flexDirection: 'column',
+                    gap: 4, fontSize: 14, marginBottom: 8 }}>
+        {messages.length === 0 && (
+          <p style={{ color: 'var(--muted)', fontSize: 13, margin: 0 }}>还没有人发言…</p>
+        )}
+        {messages.map((m) => (
+          <div key={m.id} style={{ color: m.channel === 'dead' ? 'var(--muted)' : 'var(--text)' }}>
+            {m.channel === 'dead' && '💀 '}
+            <b>{m.name}</b>:{m.text}
+          </div>
+        ))}
+        <div ref={chatEndRef} />
+      </div>
+      {canSend ? (
+        <div style={{ display: 'flex', gap: 8 }}>
+          <input
+            style={{ ...ui.input, marginBottom: 0, flex: 1 }}
+            value={text} maxLength={300}
+            placeholder={dead ? '对死者说…' : '发言讨论…'}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') send(); }}
+          />
+          <button style={ui.btnAccent} onClick={send}>发送</button>
+        </div>
+      ) : (
+        <p style={{ color: 'var(--muted)', fontSize: 13, margin: 0 }}>
+          {isSpectator ? '观战中,仅可查看讨论'
+            : state.phase === 'night' ? '🌙 夜晚不能公开发言' : '当前不能发言'}
         </p>
       )}
     </div>

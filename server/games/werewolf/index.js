@@ -27,6 +27,11 @@ const REVEAL_SECONDS = 30;  // 身份揭晓:等所有人点"进入游戏";此宽
 const NIGHT_SECONDS = 40;   // 夜晚:狼人选刀 + 预言家查验
 const DAY_SECONDS = 60;     // 白天:讨论 + 投票放逐(时间内可随时改票,到点结算)
 const DAY_HURRY_SECONDS = 5; // 白天全员投完后,把倒计时压到这么短 —— 留个改票窗口,不立即结算
+const PK_SECONDS = 30;      // 平票PK:平票者进入 PK,非平票的存活玩家重投一轮
+
+// 房主可配的默认项。tiePk:白天平票是否进入 PK 加赛(默认开)。
+const DEFAULTS = { tiePk: true };
+const CHAT_MAX = 300;       // 单条发言最大长度,防刷屏
 
 const now = () => Date.now();
 
@@ -47,7 +52,7 @@ function shuffle(arr) {
 }
 
 // ── 创建初始状态 ──
-function createInitialState(players) {
+function createInitialState(players, config = {}) {
   const ids = players.map((p) => p.id);
   const nWolf = wolfCount(ids.length);
   const shuffled = shuffle(ids);
@@ -58,7 +63,8 @@ function createInitialState(players) {
     else roles[id] = ROLE.VILLAGER;
   });
   return {
-    phase: 'lobby',                       // lobby | night | day | vote | ended
+    phase: 'lobby',                       // lobby | reveal | night | day | pk | ended
+    cfg: { tiePk: config.tiePk !== false },  // 房主配置(平票PK,默认开)
     players: players.map((p) => ({ id: p.id, name: p.name })),
     roles,                                // { playerId: role }(内部,不整体下发)
     alive: Object.fromEntries(ids.map((id) => [id, true])),
@@ -67,6 +73,7 @@ function createInitialState(players) {
     nightActions: {},                     // 本夜:{ wolfTargetVotes:{voterId:targetId}, seerCheck:{seerId,targetId} }
     seerResults: {},                      // { seerId: { [targetId]: 'wolf'|'good' } } 累积查验结果
     votes: {},                            // 白天投票:{ voterId: targetId|null }(可改票)
+    pkCandidates: null,                   // PK 加赛的候选人 [id,id];非 PK 阶段为 null
     ready: {},                            // 身份揭晓:已点"进入游戏"的玩家 { playerId: true }
     deadline: null,                       // 当前阶段截止时间戳(ms);到点由 tick 兜底推进
     pausedRemainMs: null,                 // 全员掉线时挂起的剩余时长;重连后据此重设 deadline
@@ -149,19 +156,50 @@ function resolveNight(s) {
   if (!checkWin(s)) enterDay(s);
 }
 
-// 结算白天投票 → 进入下一夜
-function resolveVote(s) {
+// 数票:返回得票最高者。max 为最高票数,leaders 为并列最高的所有人(可能 1 个或多个)。
+// 弃票(null)不计入。无人投票时 leaders 为空。
+function tallyVotes(votes) {
   const tally = {};
-  Object.values(s.votes).forEach((t) => { if (t) tally[t] = (tally[t] || 0) + 1; });
-  let out = null, max = 0, tie = false;
-  for (const [t, c] of Object.entries(tally)) {
-    if (c > max) { max = c; out = t; tie = false; }
-    else if (c === max) tie = true;
-  }
-  if (out && !tie && s.alive[out]) { s.alive[out] = false; s.lastVotedOut = out; }
-  else s.lastVotedOut = null; // 平票/无票 → 无人出局
+  Object.values(votes).forEach((t) => { if (t) tally[t] = (tally[t] || 0) + 1; });
+  let max = 0;
+  for (const c of Object.values(tally)) if (c > max) max = c;
+  const leaders = Object.keys(tally).filter((t) => tally[t] === max);
+  return { tally, max, leaders };
+}
+
+// 放逐一名玩家并记日志、判胜负、进下一夜。out 为 null 表示无人出局。
+function exileAndAdvance(s, out) {
+  if (out && s.alive[out]) { s.alive[out] = false; s.lastVotedOut = out; }
+  else s.lastVotedOut = null;
   s.log.push({ type: 'vote_result', out: s.lastVotedOut });
   if (!checkWin(s)) enterNight(s);
+}
+
+// 结算白天投票:
+//   唯一最高票 → 放逐;
+//   平票 → 开了 tiePk 且是首轮投票(非 PK 阶段) → 进 PK 加赛;否则无人出局。
+function resolveVote(s) {
+  const { max, leaders } = tallyVotes(s.votes);
+  if (leaders.length === 1 && max > 0) { exileAndAdvance(s, leaders[0]); return; }
+  // 平票或无人投票。首轮平票且开启 PK 且有 ≥2 个平票者 → 进 PK
+  if (s.cfg.tiePk && leaders.length >= 2) { enterPk(s, leaders); return; }
+  exileAndAdvance(s, null); // 无票 / 关闭PK的平票 → 无人出局
+}
+
+// 进入 PK 加赛:平票者成为候选,其余存活玩家重投一轮(候选人不投)。
+function enterPk(s, candidates) {
+  s.phase = 'pk';
+  s.pkCandidates = candidates;
+  s.votes = {};
+  setDeadline(s, PK_SECONDS);
+  s.log.push({ type: 'phase', phase: 'pk', round: s.round, candidates });
+}
+
+// 结算 PK 投票:唯一最高票放逐;再平票 → 无人出局(不无限 PK)。
+function resolvePk(s) {
+  const { max, leaders } = tallyVotes(s.votes);
+  s.pkCandidates = null;
+  exileAndAdvance(s, leaders.length === 1 && max > 0 ? leaders[0] : null);
 }
 
 // ── 应用动作 ──
@@ -223,6 +261,33 @@ function applyAction(s, action, playerId) {
       return { state: s, events };
     }
 
+    // PK 加赛投票:只有非候选的存活玩家能投,且只能投候选人之一(或弃票)。
+    case 'pk_vote': {
+      if (s.phase !== 'pk') return { error: '非 PK 阶段' };
+      if (!isAlive) return { error: '死亡玩家不能投票' };
+      if (s.pkCandidates.includes(playerId)) return { error: 'PK 候选人不参与投票' };
+      if (action.target && !s.pkCandidates.includes(action.target)) return { error: '只能投 PK 候选人' };
+      s.votes[playerId] = action.target || null;
+      hurryDayIfAllVoted(s);   // 全员(非候选存活者)投完 → 压缩倒计时
+      return { state: s, events };
+    }
+
+    // 发言(讨论用)。白天/PK 阶段:存活者发到公开频道(死者/观战者也可见);
+    // 死亡玩家:任何非结束阶段都可发,但只进"死人频道"(仅死者+观战者可见,防剧透)。
+    // 夜晚存活者不能公开发言(天黑闭眼)。频道路由在传输层(server.js)按 channel 分发。
+    case 'chat': {
+      if (s.phase === 'ended' || s.phase === 'lobby') return { error: '当前不能发言' };
+      const text = String(action.text || '').trim().slice(0, CHAT_MAX);
+      if (!text) return { state: s, events };
+      if (isAlive) {
+        if (s.phase !== 'day' && s.phase !== 'pk') return { error: '现在还不能公开发言' };
+        events.push({ type: 'chat', channel: 'alive', playerId, text });
+      } else {
+        events.push({ type: 'chat', channel: 'dead', playerId, text });
+      }
+      return { state: s, events };
+    }
+
     // 服务端计时器驱动:当前阶段到点则兜底推进(避免掉线/发呆导致死锁)
     case 'tick': {
       if (s.phase === 'ended' || !s.deadline || now() < s.deadline) return { state: s, events };
@@ -233,8 +298,11 @@ function applyAction(s, action, playerId) {
         // 未行动的狼人 → 空刀(不补随机目标,平安夜);预言家未查 → 跳过
         resolveNight(s);
       } else if (s.phase === 'day') {
-        // 到点结算:未投的算弃票,平票无人出局
+        // 到点结算:未投的算弃票,平票视配置进 PK 或无人出局
         resolveVote(s);
+      } else if (s.phase === 'pk') {
+        // PK 到点结算:再平票无人出局
+        resolvePk(s);
       }
       return { state: s, events };
     }
@@ -244,12 +312,19 @@ function applyAction(s, action, playerId) {
   }
 }
 
-// 白天全员投完 → 把 deadline 压到 DAY_HURRY_SECONDS 后(只缩短,不延长)。
-// "全员"= 所有在场存活玩家都有票记录(弃票 null 也算已投);掉线者不阻塞,
+// 该阶段哪些在场存活玩家"应当投票"。白天=全部;PK=非候选者(候选人不投自己那轮)。
+function expectedVoters(s) {
+  const voters = presentIds(s);
+  if (s.phase === 'pk') return voters.filter((id) => !s.pkCandidates.includes(id));
+  return voters;
+}
+
+// 全员投完 → 把 deadline 压到 DAY_HURRY_SECONDS 后(只缩短,不延长)。
+// "全员"= 该阶段应投票的在场存活玩家都有票记录(弃票 null 也算已投);掉线者不阻塞,
 // 与 maybeResolveNight 用 presentIds 保持一致。压缩后仍可改票,到点由 tick 结算。
 function hurryDayIfAllVoted(s) {
-  if (s.phase !== 'day' || s.deadline == null) return;
-  const voters = presentIds(s);
+  if ((s.phase !== 'day' && s.phase !== 'pk') || s.deadline == null) return;
+  const voters = expectedVoters(s);
   if (voters.length === 0) return;                        // 没人能投票,不处理
   if (!voters.every((id) => id in s.votes)) return;       // 还有人没投
   const hurryUntil = now() + DAY_HURRY_SECONDS * 1000;
@@ -289,7 +364,7 @@ function removePlayer(s, playerId) {
     enterNight(s);
   } else if (s.phase === 'night') {
     maybeResolveNight(s);
-  } else if (s.phase === 'day') {
+  } else if (s.phase === 'day' || s.phase === 'pk') {
     hurryDayIfAllVoted(s);   // 走的人若正好是剩下唯一没投的,压缩倒计时
   }
 }
@@ -308,6 +383,11 @@ function eliminatePlayer(s, playerId) {
     enterNight(s);
   } else if (s.phase === 'night') {
     maybeResolveNight(s);
+  } else if (s.phase === 'pk') {
+    // 出局的若是 PK 候选人:剔除他;不足 2 人则 PK 无意义,直接结算
+    s.pkCandidates = s.pkCandidates.filter((id) => id !== playerId);
+    if (s.pkCandidates.length < 2) resolvePk(s);
+    else hurryDayIfAllVoted(s);
   } else if (s.phase === 'day') {
     hurryDayIfAllVoted(s);
   }
@@ -353,6 +433,7 @@ function serializeStateFor(s, playerId) {
     lastVotedOut: s.lastVotedOut,
     hostId: s.hostId,
     deadline: s.deadline,               // 当前阶段截止时间戳,前端据此显示倒计时
+    cfg: s.cfg,                         // 房主配置(前端提示"平票将进入 PK"等)
   };
   // 狼人:能看到同伴狼人(不含自己;单狼局则为空数组)
   if (myRole === ROLE.WOLF) {
@@ -375,14 +456,18 @@ function serializeStateFor(s, playerId) {
     if (myRole === ROLE.WOLF) view.iActed = playerId in (s.nightActions.wolfTargetVotes || {});
     else if (myRole === ROLE.SEER) view.iActed = s.nightActions.seerCheck != null;
   }
-  // 白天(讨论+投票):公开当前票型(谁投了谁)供讨论;并标记本人当前票与是否已投
-  if (s.phase === 'day') {
+  // 白天/PK(讨论+投票):公开当前票型(谁投了谁)供讨论;并标记本人当前票与是否已投
+  if (s.phase === 'day' || s.phase === 'pk') {
     view.votes = s.votes;
     view.iVoted = playerId in s.votes;
     view.myVote = playerId in s.votes ? s.votes[playerId] : undefined;
-    // 全员(在场存活)已投 → 前端提示"即将结算",解释倒计时为何突然缩短
-    const voters = presentIds(s);
+    // 该阶段应投票者全投完 → 前端提示"即将结算",解释倒计时为何突然缩短
+    const voters = expectedVoters(s);
     view.dayAllVoted = voters.length > 0 && voters.every((id) => id in s.votes);
+    if (s.phase === 'pk') {
+      view.pkCandidates = s.pkCandidates;               // 前端据此限定投票对象、显示 PK 提示
+      view.iAmPkCandidate = s.pkCandidates.includes(playerId);
+    }
   }
   // 结束:公开所有身份
   if (s.phase === 'ended') {
@@ -412,4 +497,10 @@ module.exports = {
   pauseClock,
   resumeClock,
   ROLE,
+  // 房主配置元数据(供大厅设置面板)。type:'toggle' 由通用面板渲染成开关。
+  configSchema: {
+    tiePk: { type: 'toggle', default: DEFAULTS.tiePk,
+             label: '平票进入 PK 加赛', hint: '白天平票时,平票者发言后其余玩家重投一轮' },
+  },
+  PK_SECONDS,
 };

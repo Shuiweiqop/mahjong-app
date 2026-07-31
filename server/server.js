@@ -83,7 +83,15 @@ function broadcastState(room, extraEvents = []) {
     } else if (ev.type === 'clear') {
       io.to(room.code).emit('clear');
     } else if (ev.type === 'chat') {
-      io.to(room.code).emit('chat', { playerId: ev.playerId, text: ev.text });
+      // channel 未标 → 全房间公开(你画我猜)。
+      // 'alive' → 也是公开发言(存活玩家白天讨论),全房间可见。
+      // 'dead'  → 死人频道:只发给死者 + 观战者,存活玩家看不到(防剧透)。
+      if (ev.channel === 'dead') {
+        deadChannelSockets(room).forEach((sid) =>
+          io.to(sid).emit('chat', { playerId: ev.playerId, text: ev.text, channel: 'dead' }));
+      } else {
+        io.to(room.code).emit('chat', { playerId: ev.playerId, text: ev.text, channel: ev.channel || 'alive' });
+      }
     } else if (ev.type === 'guessed') {
       io.to(room.code).emit('guessed', { playerId: ev.playerId, points: ev.points });
     } else if (ev.type === 'reveal') {
@@ -106,6 +114,18 @@ function socketsExcept(room, exceptMemberId) {
   const map = memberSockets.get(room.code);
   if (!map) return [];
   return [...map.entries()].filter(([mid]) => mid !== exceptMemberId).map(([, sid]) => sid);
+}
+
+// 死人频道的收信人:已出局的玩家 + 所有观战者。存活玩家被排除(防剧透)。
+// 用游戏状态的 alive 表判定死活;观战者不在 state.alive 里,单独并入。
+function deadChannelSockets(room) {
+  const map = memberSockets.get(room.code);
+  if (!map || !room.state) return [];
+  const alive = room.state.alive || {};
+  const specIds = new Set(room.spectators.map((s) => s.id));
+  return [...map.entries()]
+    .filter(([mid]) => specIds.has(mid) || alive[mid] === false)
+    .map(([, sid]) => sid);
 }
 function bindSocket(room, memberId, socketId) {
   if (!memberSockets.has(room.code)) memberSockets.set(room.code, new Map());

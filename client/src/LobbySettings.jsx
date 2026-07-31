@@ -9,6 +9,32 @@ export default function LobbySettings({ lobby, isHost, onChange }) {
   if (!schema) return null;
   const cfg = lobby?.config || {};
 
+  // 通用开关型设置(configSchema 里 type:'toggle' 的项)。狼人杀等游戏用它渲染布尔开关,
+  // 你画我猜的专属项(时长/词库)仍走下方定制布局 —— 两者互不影响。
+  const toggleKeys = Object.keys(schema).filter((k) => schema[k]?.type === 'toggle');
+  if (toggleKeys.length && !schema.drawSeconds) {
+    return (
+      <div style={ui.card}>
+        <label style={ui.label}>游戏设置{!isHost && '(房主可改)'}</label>
+        {toggleKeys.map((k) => {
+          const item = schema[k];
+          const on = cfg[k] ?? item.default;
+          return (
+            <label key={k} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '8px 0',
+                                     cursor: isHost ? 'pointer' : 'default' }}>
+              <input type="checkbox" checked={!!on} disabled={!isHost} style={{ marginTop: 3 }}
+                onChange={(e) => onChange({ ...cfg, [k]: e.target.checked })} />
+              <span>
+                <div style={{ fontWeight: 700, fontSize: 14 }}>{item.label || k}</div>
+                {item.hint && <div style={{ color: 'var(--muted)', fontSize: 12 }}>{item.hint}</div>}
+              </span>
+            </label>
+          );
+        })}
+      </div>
+    );
+  }
+
   const drawSeconds = cfg.drawSeconds ?? schema.drawSeconds.default;
   const roundsPerPlayer = cfg.roundsPerPlayer ?? schema.roundsPerPlayer.default;
   const categories = cfg.categories || [];
