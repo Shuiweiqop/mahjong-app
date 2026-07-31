@@ -45,8 +45,15 @@ export default function DrawGuessGame({ state, act, me, socket, onLeave }) {
   }, []);
 
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
-  // 收到新全量状态时补画(换轮/中途加入)
-  useEffect(() => { if (state?.strokes) strokeApi.current?.redrawAll(state.strokes); }, [state]);
+  // 补画:只在服务端真的下发了全量画布时重绘(中途加入/重连/换轮清屏)。
+  // 依赖不能是整个 state —— 每次有人猜词都会广播新 state,那样等于每猜一次
+  // 就把整块画布重绘一遍,画到后期在低端手机上会明显卡顿。
+  // 常规增量走 'stroke' 事件(见上面的 onStroke),不经过这里。
+  const strokes = state?.strokes;
+  const strokeRev = state?.strokeRev;
+  useEffect(() => {
+    if (strokes) strokeApi.current?.redrawAll(strokes);
+  }, [strokes, strokeRev]);
 
   const members = state?.players || [];
   const nameOf = (id) => members.find((p) => p.id === id)?.name || '玩家';
