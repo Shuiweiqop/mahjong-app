@@ -200,6 +200,46 @@ test('宽限期后真正出局:唯一的狼退出 → 好人胜', () => {
   assert.strictEqual(s.winner, 'good');
 });
 
+// ── 房主配置(阶段时长) ──
+
+test('房主设置的阶段时长真的生效', () => {
+  const s = ww.createInitialState(P(8), { nightSeconds: 30, speechSeconds: 20, daySeconds: 30 });
+  assert.strictEqual(s.cfg.nightSeconds, 30);
+  assert.strictEqual(s.cfg.speechSeconds, 20);
+
+  ww.applyAction(s, { type: 'start' }, s.hostId);
+  s.players.forEach((p) => ww.applyAction(s, { type: 'ready' }, p.id));
+  const left = Math.round((s.deadline - Date.now()) / 1000);
+  assert.ok(Math.abs(left - 30) <= 1, `夜晚倒计时应用配置值,实际 ${left}s`);
+});
+
+test('伪造的非法时长退回默认值', () => {
+  // 客户端可以伪造任意 config。0 秒会让阶段瞬间跳过,超大值会卡死整局,
+  // 所以取值必须在服务端按白名单校验,不能只靠前端限制。
+  for (const bad of [
+    { speechSeconds: 0 }, { speechSeconds: 99999 }, { daySeconds: 'abc' },
+    { nightSeconds: -5 }, { pkSeconds: null }, { witchSeconds: 1e9 },
+  ]) {
+    const key = Object.keys(bad)[0];
+    const s = ww.createInitialState(P(8), bad);
+    const opts = ww.configSchema[key].options;
+    assert.ok(opts.includes(s.cfg[key]), `${key}=${JSON.stringify(bad[key])} 应退回白名单内的值`);
+  }
+});
+
+test('configSchema 的每一项都能被通用面板渲染', () => {
+  // 前端只认 toggle / options 两种;漏写 type 的项会静默不显示,房主根本改不到
+  for (const [key, item] of Object.entries(ww.configSchema)) {
+    assert.ok(['toggle', 'options'].includes(item.type), `${key} 的 type 无法渲染`);
+    assert.ok(item.label, `${key} 缺 label`);
+    assert.notStrictEqual(item.default, undefined, `${key} 缺 default`);
+    if (item.type === 'options') {
+      assert.ok(Array.isArray(item.options) && item.options.length, `${key} 缺 options`);
+      assert.ok(item.options.includes(item.default), `${key} 的 default 不在 options 里`);
+    }
+  }
+});
+
 // ── 轮流发言 ──
 
 // 跑到白天发言阶段

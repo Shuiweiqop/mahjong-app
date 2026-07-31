@@ -33,19 +33,45 @@ function godCountFor(n) {
   return 1;
 }
 
-// 各阶段超时(秒)。到点由服务端计时器(tick)兜底推进,避免有人掉线/发呆时死锁。
-const REVEAL_SECONDS = 30;  // 身份揭晓:等所有人点"进入游戏";此宽限超时只为防有人不点而卡住
-const NIGHT_SECONDS = 40;   // 夜晚:狼人选刀 + 预言家查验
-const DAY_SECONDS = 60;     // 投票阶段:可随时改票,到点结算
-const SPEECH_SECONDS = 45;  // 单人发言时限;说完点"过"或超时自动轮下一个
-const DAY_HURRY_SECONDS = 5; // 白天全员投完后,把倒计时压到这么短 —— 留个改票窗口,不立即结算
-const PK_SECONDS = 30;      // 平票PK:平票者进入 PK,非平票的存活玩家重投一轮
-const WITCH_SECONDS = 25;   // 女巫用药:狼刀结算后单独一段(她要先看到刀口)
-const HUNTER_SECONDS = 20;  // 猎人开枪:出局后的即时反应,时间短
+// 各阶段时长(秒)的默认值。到点由服务端计时器(tick)兜底推进,避免有人掉线/发呆时死锁。
+// 全部可由房主在大厅调整 —— 不同人群的节奏差别很大(线下玩家习惯长发言,
+// 线上玩家耐心短),写死一个值必然有一半人觉得难受。实际取值一律走 s.cfg,
+// 这里只是默认值和"没配置时"的兜底。
+const DEFAULTS = {
+  tiePk: true,
+  revealSeconds: 30,   // 身份揭晓:等所有人点"进入游戏";此宽限超时只为防有人不点而卡住
+  nightSeconds: 40,    // 夜晚:狼人选刀 + 预言家查验
+  speechSeconds: 45,   // 单人发言时限;说完点"过"或超时自动轮下一个
+  daySeconds: 60,      // 投票阶段:可随时改票,到点结算
+  pkSeconds: 30,       // 平票 PK:平票者进入 PK,非平票的存活玩家重投一轮
+  witchSeconds: 25,    // 女巫用药:狼刀结算后单独一段(她要先看到刀口)
+  hunterSeconds: 20,   // 猎人开枪:出局后的即时反应,时间短
+};
 
-// 房主可配的默认项。tiePk:白天平票是否进入 PK 加赛(默认开)。
-const DEFAULTS = { tiePk: true };
-const CHAT_MAX = 300;       // 单条发言最大长度,防刷屏
+// 每项的可选值(前端渲染成一排按钮,同时也是服务端的白名单)。
+// 客户端可以伪造任意 config,所以取值必须在这里校验,不能只靠前端限制。
+const TIME_OPTIONS = {
+  revealSeconds: [15, 30, 45, 60],
+  nightSeconds: [30, 40, 60, 90],
+  speechSeconds: [20, 30, 45, 60, 90],
+  daySeconds: [30, 45, 60, 90, 120],
+  pkSeconds: [20, 30, 45, 60],
+  witchSeconds: [15, 25, 40, 60],
+  hunterSeconds: [15, 20, 30, 45],
+};
+
+const DAY_HURRY_SECONDS = 5; // 白天全员投完后,把倒计时压到这么短 —— 留个改票窗口,不立即结算
+const CHAT_MAX = 300;        // 单条发言最大长度,防刷屏
+
+// 规整房主传入的配置:不在白名单里的值一律退回默认,防伪造的 config 把
+// 某个阶段设成 0 秒(瞬间跳过)或 99999 秒(卡死整局)。
+function normalizeConfig(cfg = {}) {
+  const out = { tiePk: cfg.tiePk !== false };
+  for (const [key, options] of Object.entries(TIME_OPTIONS)) {
+    out[key] = options.includes(cfg[key]) ? cfg[key] : DEFAULTS[key];
+  }
+  return out;
+}
 
 const now = () => Date.now();
 
@@ -79,7 +105,7 @@ function createInitialState(players, config = {}) {
   });
   return {
     phase: 'lobby',                       // lobby | reveal | night | day | pk | ended
-    cfg: { tiePk: config.tiePk !== false },  // 房主配置(平票PK,默认开)
+    cfg: normalizeConfig(config),   // 房主配置(阶段时长 + 平票 PK)
     players: players.map((p) => ({ id: p.id, name: p.name })),
     roles,                                // { playerId: role }(内部,不整体下发)
     alive: Object.fromEntries(ids.map((id) => [id, true])),
@@ -158,7 +184,7 @@ function setDeadline(s, seconds) {
 function enterReveal(s) {
   s.phase = 'reveal';
   s.ready = {};
-  setDeadline(s, REVEAL_SECONDS);
+  setDeadline(s, s.cfg.revealSeconds);
 }
 
 // 进入夜晚
@@ -166,7 +192,7 @@ function enterNight(s) {
   s.round += 1;
   s.phase = 'night';
   s.nightActions = { wolfTargetVotes: {}, seerCheck: null, witch: null, victim: null };
-  setDeadline(s, NIGHT_SECONDS);
+  setDeadline(s, s.cfg.nightSeconds);
   s.log.push({ type: 'phase', phase: 'night', round: s.round });
 }
 
@@ -174,7 +200,7 @@ function enterNight(s) {
 // 先结算狼刀定下 victim,再单独给女巫一段时间用药。没有女巫时这一段直接跳过。
 function enterWitchTurn(s) {
   s.phase = 'witch';
-  setDeadline(s, WITCH_SECONDS);
+  setDeadline(s, s.cfg.witchSeconds);
 }
 
 // 统一的死亡入口。所有让人出局的路径都走这里,好处是猎人的触发只写一次 ——
@@ -196,7 +222,7 @@ function killPlayer(s, id, cause) {
 // 回到本来该去的地方。
 function enterHunterTurn(s) {
   s.phase = 'hunter';
-  setDeadline(s, HUNTER_SECONDS);
+  setDeadline(s, s.cfg.hunterSeconds);
   s.log.push({ type: 'hunter_turn', playerId: s.pendingHunter });
 }
 
@@ -228,7 +254,7 @@ function enterSpeech(s) {
   s.phase = 'speech';
   s.speechOrder = [...order.slice(start), ...order.slice(0, start)];
   s.speechIndex = 0;
-  setDeadline(s, SPEECH_SECONDS);
+  setDeadline(s, s.cfg.speechSeconds);
   s.log.push({ type: 'phase', phase: 'speech', round: s.round, order: s.speechOrder });
 }
 
@@ -239,7 +265,7 @@ function nextSpeaker(s) {
     const id = s.speechOrder[i];
     if (s.alive[id] && !s.absent[id]) {
       s.speechIndex = i;
-      setDeadline(s, SPEECH_SECONDS);
+      setDeadline(s, s.cfg.speechSeconds);
       return;
     }
   }
@@ -256,7 +282,7 @@ function enterDay(s) {
   s.votes = {};
   s.speechOrder = null;
   s.speechIndex = 0;
-  setDeadline(s, DAY_SECONDS);
+  setDeadline(s, s.cfg.daySeconds);
   s.log.push({ type: 'phase', phase: 'day', round: s.round });
 }
 
@@ -351,7 +377,7 @@ function enterPk(s, candidates) {
   s.phase = 'pk';
   s.pkCandidates = candidates;
   s.votes = {};
-  setDeadline(s, PK_SECONDS);
+  setDeadline(s, s.cfg.pkSeconds);
   s.log.push({ type: 'phase', phase: 'pk', round: s.round, candidates });
 }
 
@@ -786,10 +812,25 @@ module.exports = {
   pauseClock,
   resumeClock,
   ROLE,
-  // 房主配置元数据(供大厅设置面板)。type:'toggle' 由通用面板渲染成开关。
+  // 房主配置元数据(供大厅设置面板)。
+  // type:'toggle' → 开关;type:'options' → 一排可选值按钮。两者都由通用面板渲染,
+  // 加新配置项只改这里,前端不用动。
   configSchema: {
     tiePk: { type: 'toggle', default: DEFAULTS.tiePk,
              label: '平票进入 PK 加赛', hint: '白天平票时,平票者发言后其余玩家重投一轮' },
+    speechSeconds: { type: 'options', options: TIME_OPTIONS.speechSeconds, default: DEFAULTS.speechSeconds,
+                     unit: 's', label: '每人发言时长', hint: '轮流发言,说完可点"过"提前结束' },
+    daySeconds: { type: 'options', options: TIME_OPTIONS.daySeconds, default: DEFAULTS.daySeconds,
+                  unit: 's', label: '投票时长', hint: '发言结束后的投票阶段,期间可改票' },
+    nightSeconds: { type: 'options', options: TIME_OPTIONS.nightSeconds, default: DEFAULTS.nightSeconds,
+                    unit: 's', label: '夜晚时长', hint: '狼人选刀 + 预言家查验' },
+    witchSeconds: { type: 'options', options: TIME_OPTIONS.witchSeconds, default: DEFAULTS.witchSeconds,
+                    unit: 's', label: '女巫用药时长', hint: '7 人及以上才有女巫' },
+    hunterSeconds: { type: 'options', options: TIME_OPTIONS.hunterSeconds, default: DEFAULTS.hunterSeconds,
+                     unit: 's', label: '猎人开枪时长', hint: '10 人及以上才有猎人' },
+    pkSeconds: { type: 'options', options: TIME_OPTIONS.pkSeconds, default: DEFAULTS.pkSeconds,
+                 unit: 's', label: 'PK 投票时长', hint: '仅在开启平票 PK 时用到' },
+    revealSeconds: { type: 'options', options: TIME_OPTIONS.revealSeconds, default: DEFAULTS.revealSeconds,
+                     unit: 's', label: '身份揭晓时长', hint: '所有人点"进入游戏"即提前开始' },
   },
-  PK_SECONDS,
 };

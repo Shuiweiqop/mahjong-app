@@ -9,26 +9,54 @@ export default function LobbySettings({ lobby, isHost, onChange }) {
   if (!schema) return null;
   const cfg = lobby?.config || {};
 
-  // 通用开关型设置(configSchema 里 type:'toggle' 的项)。狼人杀等游戏用它渲染布尔开关,
-  // 你画我猜的专属项(时长/词库)仍走下方定制布局 —— 两者互不影响。
-  const toggleKeys = Object.keys(schema).filter((k) => schema[k]?.type === 'toggle');
-  if (toggleKeys.length && !schema.drawSeconds) {
+  // 通用设置面板:按 configSchema 的 type 渲染,不认识具体游戏。
+  //   type:'toggle'  → 开关
+  //   type:'options' → 一排可选值按钮(阶段时长等)
+  // 游戏模块加新配置项只改 configSchema,这里不用动。
+  // 你画我猜的专属项(词库/自定义词)仍走下方定制布局 —— 用 drawSeconds 区分。
+  const genericKeys = Object.keys(schema)
+    .filter((k) => schema[k]?.type === 'toggle' || schema[k]?.type === 'options');
+  if (genericKeys.length && !schema.drawSeconds) {
     return (
       <div style={ui.card}>
         <label style={ui.label}>游戏设置{!isHost && '(房主可改)'}</label>
-        {toggleKeys.map((k) => {
+        {genericKeys.map((k) => {
           const item = schema[k];
-          const on = cfg[k] ?? item.default;
+          const val = cfg[k] ?? item.default;
+
+          if (item.type === 'toggle') {
+            return (
+              <label key={k} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '8px 0',
+                                       cursor: isHost ? 'pointer' : 'default' }}>
+                <input type="checkbox" checked={!!val} disabled={!isHost} style={{ marginTop: 3 }}
+                  onChange={(e) => onChange({ ...cfg, [k]: e.target.checked })} />
+                <span>
+                  <div style={{ fontWeight: 700, fontSize: 14 }}>{item.label || k}</div>
+                  {item.hint && <div style={{ color: 'var(--muted)', fontSize: 12 }}>{item.hint}</div>}
+                </span>
+              </label>
+            );
+          }
+
           return (
-            <label key={k} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '8px 0',
-                                     cursor: isHost ? 'pointer' : 'default' }}>
-              <input type="checkbox" checked={!!on} disabled={!isHost} style={{ marginTop: 3 }}
-                onChange={(e) => onChange({ ...cfg, [k]: e.target.checked })} />
-              <span>
-                <div style={{ fontWeight: 700, fontSize: 14 }}>{item.label || k}</div>
-                {item.hint && <div style={{ color: 'var(--muted)', fontSize: 12 }}>{item.hint}</div>}
-              </span>
-            </label>
+            <div key={k} style={{ padding: '8px 0' }}>
+              <div style={{ fontWeight: 700, fontSize: 14 }}>{item.label || k}</div>
+              {item.hint && (
+                <div style={{ color: 'var(--muted)', fontSize: 12, marginBottom: 6 }}>{item.hint}</div>
+              )}
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 4 }}>
+                {item.options.map((opt) => (
+                  <button key={opt} disabled={!isHost}
+                    onClick={() => onChange({ ...cfg, [k]: opt })}
+                    style={{
+                      padding: '5px 12px', borderRadius: 999, fontSize: 13, fontWeight: 700,
+                      border: '1px solid var(--border)', cursor: isHost ? 'pointer' : 'default',
+                      background: val === opt ? 'var(--primary)' : 'var(--surface-2)',
+                      color: val === opt ? '#fff' : 'var(--muted)',
+                    }}>{opt}{item.unit || ''}</button>
+                ))}
+              </div>
+            </div>
           );
         })}
       </div>
