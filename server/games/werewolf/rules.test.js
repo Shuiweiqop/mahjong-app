@@ -160,7 +160,8 @@ test('狼人数 ≥ 好人数 → 狼胜(已成定局,不必走流程)', () => {
   // 留到只剩 (狼数) 个好人 —— 狼可以强行票死任何人
   goods.slice(wolves.length).forEach((id) => { s.alive[id] = false; });
 
-  s.deadline = Date.now() - 1;
+  // 从白天结算触发。夜晚会先经过女巫阶段,那是另一条路径,这里只关心胜负判定。
+  s.phase = 'day'; s.votes = {}; s.deadline = Date.now() - 1;
   ww.applyAction(s, { type: 'tick' }, null);
   assert.strictEqual(s.phase, 'ended');
   assert.strictEqual(s.winner, 'wolf');
@@ -169,7 +170,7 @@ test('狼人数 ≥ 好人数 → 狼胜(已成定局,不必走流程)', () => {
 test('平民全灭 → 狼胜(屠民边仍然有效)', () => {
   const s = nightState(12);
   roleOf(s, 'villager').forEach((id) => { s.alive[id] = false; });
-  s.deadline = Date.now() - 1;
+  s.phase = 'day'; s.votes = {}; s.deadline = Date.now() - 1;
   ww.applyAction(s, { type: 'tick' }, null);
   assert.strictEqual(s.winner, 'wolf', '屠民边不受本次改动影响');
 });
@@ -197,6 +198,194 @@ test('宽限期后真正出局:唯一的狼退出 → 好人胜', () => {
   ww.eliminatePlayer(s, wolf);
   assert.strictEqual(s.phase, 'ended', '真出局后必须重跑胜负,否则好人永远赢不了');
   assert.strictEqual(s.winner, 'good');
+});
+
+// ── 女巫 ──
+
+// 造一个"狼刀已定、轮到女巫"的状态
+function witchTurn(n = 8) {
+  const s = ww.createInitialState(P(n), {});
+  ww.applyAction(s, { type: 'start' }, s.hostId);
+  s.players.forEach((p) => ww.applyAction(s, { type: 'ready' }, p.id));
+  const victim = s.players.map((p) => p.id)
+    .find((id) => s.roles[id] === ROLE_VILLAGER && s.alive[id]);
+  roleOf(s, 'wolf').forEach((w) => ww.applyAction(s, { type: 'wolf_kill', target: victim }, w));
+  const seer = roleOf(s, 'seer')[0];
+  if (s.phase === 'night' && seer) {
+    const t = s.players.map((p) => p.id).find((id) => id !== seer && s.alive[id]);
+    ww.applyAction(s, { type: 'seer_check', target: t }, seer);
+  }
+  return { s, witch: roleOf(s, 'witch')[0], victim };
+}
+const ROLE_VILLAGER = 'villager';
+
+test('女巫能看到今晚的刀口,别人看不到', () => {
+  const { s, witch, victim } = witchTurn();
+  assert.strictEqual(s.phase, 'witch', '狼刀结算后应进入女巫阶段');
+  assert.strictEqual(ww.serializeStateFor(s, witch).witchVictim, victim);
+
+  for (const p of s.players) {
+    if (p.id === witch) continue;
+    assert.strictEqual(
+      ww.serializeStateFor(s, p.id).witchVictim, undefined,
+      '刀口只能发给女巫 —— 发给别人等于公开今晚谁死'
+    );
+  }
+});
+
+test('解药救下刀口,毒药毒死目标,各自消耗', () => {
+  let { s, witch, victim } = witchTurn();
+  ww.applyAction(s, { type: 'witch', heal: true }, witch);
+  assert.strictEqual(s.alive[victim], true, '被救的人应存活');
+  assert.strictEqual(s.potions.heal, false, '解药应被消耗');
+
+  ({ s, witch, victim } = witchTurn());
+  const target = s.players.map((p) => p.id).find((id) => id !== witch && id !== victim && s.alive[id]);
+  ww.applyAction(s, { type: 'witch', poison: target }, witch);
+  assert.strictEqual(s.alive[victim], false, '没救就该死');
+  assert.strictEqual(s.alive[target], false, '被毒的人应出局');
+  assert.strictEqual(s.potions.poison, false, '毒药应被消耗');
+});
+
+test('同一夜不能又救又毒;药用完不能再用', () => {
+  let { s, witch, victim } = witchTurn();
+  const other = s.players.map((p) => p.id).find((id) => id !== witch && id !== victim && s.alive[id]);
+  assert.ok(ww.applyAction(s, { type: 'witch', heal: true, poison: other }, witch).error);
+
+  ({ s, witch } = witchTurn());
+  s.potions.heal = false;
+  assert.ok(ww.applyAction(s, { type: 'witch', heal: true }, witch).error, '解药用完不能再救');
+});
+
+test('首夜可以自救,之后不能', () => {
+  // 首夜:狼刀女巫,她可以救自己
+  const s1 = ww.createInitialState(P(8), {});
+  ww.applyAction(s1, { type: 'start' }, s1.hostId);
+  s1.players.forEach((p) => ww.applyAction(s1, { type: 'ready' }, p.id));
+  const w1 = roleOf(s1, 'witch')[0];
+  roleOf(s1, 'wolf').forEach((w) => ww.applyAction(s1, { type: 'wolf_kill', target: w1 }, w));
+  const se1 = roleOf(s1, 'seer')[0];
+  if (s1.phase === 'night' && se1) {
+    ww.applyAction(s1, { type: 'seer_check', target: s1.players.find((p) => p.id !== se1).id }, se1);
+  }
+  assert.ok(!ww.applyAction(s1, { type: 'witch', heal: true }, w1).error, '首夜应可自救');
+
+  // 第二夜起不行
+  const { s, witch } = witchTurn();
+  s.round = 2;
+  s.nightActions.victim = witch;
+  assert.ok(ww.applyAction(s, { type: 'witch', heal: true }, witch).error, '首夜之后不能自救');
+});
+
+test('非女巫不能用药;女巫掉线不会卡住全场', () => {
+  const { s, witch, victim } = witchTurn();
+  const other = s.players.map((p) => p.id).find((id) => id !== witch && s.alive[id]);
+  assert.ok(ww.applyAction(s, { type: 'witch', heal: true }, other).error);
+
+  ww.removePlayer(s, witch);
+  assert.notStrictEqual(s.phase, 'witch', '女巫掉线应视为跳过,否则全场干等到超时');
+  assert.strictEqual(s.alive[victim], false, '跳过后按原刀口结算');
+});
+
+// ── 猎人 ──
+
+test('猎人被刀可以开枪带走一人,之后进白天', () => {
+  const s = ww.createInitialState(P(12), {});
+  ww.applyAction(s, { type: 'start' }, s.hostId);
+  s.players.forEach((p) => ww.applyAction(s, { type: 'ready' }, p.id));
+  const hunter = roleOf(s, 'hunter')[0];
+  roleOf(s, 'wolf').forEach((w) => ww.applyAction(s, { type: 'wolf_kill', target: hunter }, w));
+  const seer = roleOf(s, 'seer')[0];
+  if (s.phase === 'night') {
+    ww.applyAction(s, { type: 'seer_check', target: s.players.find((p) => p.id !== seer).id }, seer);
+  }
+  if (s.phase === 'witch') ww.applyAction(s, { type: 'witch' }, roleOf(s, 'witch')[0]);
+
+  assert.strictEqual(s.phase, 'hunter', '猎人出局应进入开枪阶段');
+  assert.strictEqual(s.pendingHunter, hunter);
+
+  const target = s.players.map((p) => p.id).find((id) => s.alive[id]);
+  ww.applyAction(s, { type: 'hunter_shoot', target }, hunter);
+  assert.strictEqual(s.alive[target], false, '被开枪的人应出局');
+  assert.ok(s.phase !== 'hunter', '开枪后应离开该阶段');
+});
+
+test('猎人被毒死不能开枪', () => {
+  const s = ww.createInitialState(P(12), {});
+  ww.applyAction(s, { type: 'start' }, s.hostId);
+  s.players.forEach((p) => ww.applyAction(s, { type: 'ready' }, p.id));
+  const hunter = roleOf(s, 'hunter')[0];
+  const witch = roleOf(s, 'witch')[0];
+  const victim = s.players.map((p) => p.id).find((id) => s.roles[id] === 'villager' && s.alive[id]);
+  roleOf(s, 'wolf').forEach((w) => ww.applyAction(s, { type: 'wolf_kill', target: victim }, w));
+  const seer = roleOf(s, 'seer')[0];
+  if (s.phase === 'night') {
+    ww.applyAction(s, { type: 'seer_check', target: s.players.find((p) => p.id !== seer).id }, seer);
+  }
+  ww.applyAction(s, { type: 'witch', poison: hunter }, witch);
+
+  assert.strictEqual(s.alive[hunter], false, '猎人应被毒死');
+  assert.notStrictEqual(s.phase, 'hunter', '被毒死的猎人不能开枪');
+  assert.strictEqual(s.pendingHunter, null);
+});
+
+test('猎人被票出后开枪,再进夜晚', () => {
+  const s = ww.createInitialState(P(12), {});
+  ww.applyAction(s, { type: 'start' }, s.hostId);
+  s.players.forEach((p) => ww.applyAction(s, { type: 'ready' }, p.id));
+  const hunter = roleOf(s, 'hunter')[0];
+  s.phase = 'day'; s.votes = {}; s.deadline = Date.now() + 60_000;
+  s.players.filter((p) => s.alive[p.id] && p.id !== hunter)
+    .forEach((p) => ww.applyAction(s, { type: 'vote', target: hunter }, p.id));
+  s.deadline = Date.now() - 1;
+  ww.applyAction(s, { type: 'tick' }, null);
+
+  assert.strictEqual(s.phase, 'hunter');
+  const target = s.players.map((p) => p.id).find((id) => s.alive[id]);
+  ww.applyAction(s, { type: 'hunter_shoot', target }, hunter);
+  assert.strictEqual(s.phase, 'night', '白天票出的猎人开完枪应进夜晚');
+});
+
+test('非猎人不能开枪;超时视为放弃', () => {
+  const s = ww.createInitialState(P(12), {});
+  ww.applyAction(s, { type: 'start' }, s.hostId);
+  s.players.forEach((p) => ww.applyAction(s, { type: 'ready' }, p.id));
+  const hunter = roleOf(s, 'hunter')[0];
+  s.phase = 'hunter'; s.pendingHunter = hunter; s.resumeTo = 'day';
+  s.deadline = Date.now() + 20_000;
+
+  const other = s.players.map((p) => p.id).find((id) => id !== hunter && s.alive[id]);
+  assert.ok(ww.applyAction(s, { type: 'hunter_shoot', target: other }, other).error);
+
+  s.deadline = Date.now() - 1;
+  ww.applyAction(s, { type: 'tick' }, null);
+  assert.notStrictEqual(s.phase, 'hunter', '超时应自动离开开枪阶段');
+});
+
+// ── 神职数量与屠神边 ──
+
+test('神职按人数递进上场', () => {
+  const gods = (n) => {
+    const s = ww.createInitialState(P(n), {});
+    return Object.values(s.roles).filter((r) => ['seer', 'witch', 'hunter'].includes(r)).length;
+  };
+  assert.strictEqual(gods(6), 1, '小局只有预言家');
+  assert.strictEqual(gods(8), 2, '中局加女巫');
+  assert.strictEqual(gods(12), 3, '大局加猎人');
+
+  // 每种神最多 1 个
+  const s = ww.createInitialState(P(12), {});
+  for (const r of ['seer', 'witch', 'hunter']) {
+    assert.strictEqual(roleOf(s, r).length, 1, `${r} 应该只有 1 个`);
+  }
+});
+
+test('神职 ≥ 2 时屠神边恢复生效', () => {
+  const s = nightState(8);
+  roleOf(s, 'seer').concat(roleOf(s, 'witch')).forEach((id) => { s.alive[id] = false; });
+  s.deadline = Date.now() - 1;
+  ww.applyAction(s, { type: 'tick' }, null);
+  assert.strictEqual(s.winner, 'wolf', '2 神时神全灭应判狼胜');
 });
 
 // ── 发言频道(死人频道不能被存活玩家看到,靠 channel 标记路由) ──

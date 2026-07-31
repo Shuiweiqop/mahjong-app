@@ -9,6 +9,8 @@ import { ui } from './ui';
 const ROLE_INFO = {
   wolf: { emoji: '🐺', name: '狼人', desc: '夜晚与同伴一起猎杀一名玩家' },
   seer: { emoji: '🔮', name: '预言家', desc: '每晚查验一名玩家的身份' },
+  witch: { emoji: '🧪', name: '女巫', desc: '解药救人、毒药毒人,各一瓶' },
+  hunter: { emoji: '🔫', name: '猎人', desc: '出局时可开枪带走一名玩家(被毒除外)' },
   villager: { emoji: '👤', name: '平民', desc: '白天找出并投票放逐狼人' },
 };
 
@@ -103,7 +105,10 @@ export default function WerewolfGame({ state, act, me, socket }) {
     );
   }
 
-  const phaseLabel = { night: '🌙 夜晚', day: '☀️ 白天讨论 · 投票', pk: '⚔️ 平票 PK' }[state.phase] || state.phase;
+  const phaseLabel = {
+    night: '🌙 夜晚', day: '☀️ 白天讨论 · 投票', pk: '⚔️ 平票 PK',
+    witch: '🧪 女巫用药', hunter: '🔫 猎人开枪',
+  }[state.phase] || state.phase;
 
   return (
     <div>
@@ -150,15 +155,29 @@ export default function WerewolfGame({ state, act, me, socket }) {
                   `${nameOf(id)}=${r === 'wolf' ? '狼人❌' : '好人✅'}`).join('、')}
               </div>
             )}
+            {state.myRole === 'witch' && state.potions && (
+              <div style={{ fontSize: 13, marginTop: 6 }}>
+                🧪 解药 {state.potions.heal ? '✅' : '❌'} · 毒药 {state.potions.poison ? '✅' : '❌'}
+              </div>
+            )}
+            {state.myRole === 'hunter' && (
+              <div style={{ fontSize: 13, marginTop: 6 }}>
+                🔫 {state.hunterCanShoot ? '枪已上膛(出局时可开枪,被毒除外)' : '枪已用过'}
+              </div>
+            )}
               </>
             )}
           </div>
 
-          {/* 行动区 */}
+          {/* 行动区。猎人的开枪要放在"已出局"判断之前 —— 他正是因为死了才要开枪。 */}
           {isSpectator ? (
             <p style={{ color: 'var(--muted)', textAlign: 'center' }}>👀 观战中,无法参与行动</p>
+          ) : state.phase === 'hunter' ? (
+            <HunterShot state={state} act={act} nameOf={nameOf} alivePlayers={alivePlayers} />
           ) : !iAmAlive ? (
             <p style={{ color: 'var(--muted)', textAlign: 'center' }}>你已出局,静静观战…</p>
+          ) : state.phase === 'witch' ? (
+            <WitchActions state={state} act={act} nameOf={nameOf} alivePlayers={alivePlayers} />
           ) : state.phase === 'night' ? (
             <NightActions state={state} act={act} me={me} alivePlayers={alivePlayers} />
           ) : state.phase === 'day' ? (
@@ -189,6 +208,87 @@ export default function WerewolfGame({ state, act, me, socket }) {
             </div>
           ))}
         </div>
+      </div>
+    </div>
+  );
+}
+
+// 女巫用药。服务端在狼刀结算后单独开一段给她,因为她要先看到刀口才能决定。
+// 刀口(state.witchVictim)只会下发给女巫本人。
+function WitchActions({ state, act, nameOf, alivePlayers }) {
+  const [mode, setMode] = useState(null);   // null | 'poison'(选毒药目标中)
+  const victim = state.witchVictim;
+  const potions = state.potions || {};
+  // 首夜可自救;之后刀口是自己就不能用解药
+  const selfBlocked = victim === state.myId && !state.canSelfHeal;
+  const canHeal = potions.heal && victim && !selfBlocked;
+
+  if (state.myRole !== 'witch') {
+    return <p style={{ color: 'var(--muted)', textAlign: 'center' }}>🌙 天黑请闭眼,女巫行动中…</p>;
+  }
+  if (state.iActed) return <WaitHint text="✓ 已行动,等待天亮…" />;
+
+  if (mode === 'poison') {
+    return (
+      <div>
+        <p style={{ marginBottom: 10, fontWeight: 700, textAlign: 'center' }}>☠️ 选择要毒的玩家</p>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {alivePlayers.filter((p) => p.id !== state.myId).map((p) => (
+            <button key={p.id} style={{ ...ui.btnGhost, color: 'var(--danger)' }}
+              onClick={() => act({ type: 'witch', poison: p.id })}>毒死 {p.name}</button>
+          ))}
+        </div>
+        <button style={{ ...ui.btnGhost, marginTop: 8, width: '100%' }} onClick={() => setMode(null)}>
+          返回
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <p style={{ marginBottom: 10, fontWeight: 700, textAlign: 'center' }}>
+        {victim ? `🔪 今晚 ${nameOf(victim)} 倒牌` : '🌙 今晚是平安夜(无人被刀)'}
+      </p>
+      <div style={{ fontSize: 13, color: 'var(--muted)', textAlign: 'center', marginBottom: 10 }}>
+        解药 {potions.heal ? '✅' : '❌ 已用'} · 毒药 {potions.poison ? '✅' : '❌ 已用'}
+        {selfBlocked && ' · 首夜之后不能自救'}
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {canHeal && (
+          <button style={{ ...ui.btnGhost, color: 'var(--accent)' }}
+            onClick={() => act({ type: 'witch', heal: true })}>💊 使用解药救 {nameOf(victim)}</button>
+        )}
+        {potions.poison && (
+          <button style={{ ...ui.btnGhost, color: 'var(--danger)' }}
+            onClick={() => setMode('poison')}>☠️ 使用毒药</button>
+        )}
+        <button style={ui.btnGhost} onClick={() => act({ type: 'witch' })}>跳过(不用药)</button>
+      </div>
+    </div>
+  );
+}
+
+// 猎人开枪。注意这个组件对"已出局"的猎人也要渲染 —— 他正是因为死了才开枪。
+function HunterShot({ state, act, nameOf, alivePlayers }) {
+  if (!state.iAmShooting) {
+    return (
+      <p style={{ color: 'var(--muted)', textAlign: 'center' }}>
+        🔫 {nameOf(state.pendingHunter)} 是猎人,正在选择开枪目标…
+      </p>
+    );
+  }
+  return (
+    <div>
+      <p style={{ marginBottom: 10, fontWeight: 700, textAlign: 'center' }}>🔫 你出局了 —— 开枪带走一人</p>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {alivePlayers.map((p) => (
+          <button key={p.id} style={{ ...ui.btnGhost, color: 'var(--danger)' }}
+            onClick={() => act({ type: 'hunter_shoot', target: p.id })}>开枪射杀 {p.name}</button>
+        ))}
+        <button style={ui.btnGhost} onClick={() => act({ type: 'hunter_shoot', target: null })}>
+          放弃开枪
+        </button>
       </div>
     </div>
   );

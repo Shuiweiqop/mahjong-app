@@ -10,17 +10,28 @@
 // reveal 阶段不计时(等所有人点"进入游戏"),带宽限超时兜底;其余阶段到点由 tick 推进,避免死锁。
 // 纯逻辑,不碰 socket/db,便于测试。
 
-const ROLE = { WOLF: 'wolf', SEER: 'seer', VILLAGER: 'villager' };
+const ROLE = { WOLF: 'wolf', SEER: 'seer', WITCH: 'witch', HUNTER: 'hunter', VILLAGER: 'villager' };
 
 // 角色 → 阵营。屠边胜利按阵营判定(狼屠光"平民边"或"神职边"即胜)。
 // 新增角色只需在此登记阵营,checkWin 无需改动(避免在多处枚举具体角色)。
 const FACTION = { wolf: 'wolf', god: 'god', villager: 'villager' };
 const ROLE_FACTION = {
   [ROLE.WOLF]: FACTION.wolf,
-  [ROLE.SEER]: FACTION.god,       // 预言家属神职;女巫/猎人等未来神职同样填 god
+  [ROLE.SEER]: FACTION.god,
+  [ROLE.WITCH]: FACTION.god,
+  [ROLE.HUNTER]: FACTION.god,
   [ROLE.VILLAGER]: FACTION.villager,
 };
 const factionOf = (role) => ROLE_FACTION[role];
+
+// 神职上场顺序:人数越多神越多。小局保持轻快(只有预言家),
+// 中局加女巫,大局再加猎人。神职 ≥ 2 时屠神边规则自动恢复(见 checkWin)。
+const GOD_ORDER = [ROLE.SEER, ROLE.WITCH, ROLE.HUNTER];
+function godCountFor(n) {
+  if (n >= 10) return 3;
+  if (n >= 7) return 2;
+  return 1;
+}
 
 // 各阶段超时(秒)。到点由服务端计时器(tick)兜底推进,避免有人掉线/发呆时死锁。
 const REVEAL_SECONDS = 30;  // 身份揭晓:等所有人点"进入游戏";此宽限超时只为防有人不点而卡住
@@ -28,6 +39,8 @@ const NIGHT_SECONDS = 40;   // 夜晚:狼人选刀 + 预言家查验
 const DAY_SECONDS = 60;     // 白天:讨论 + 投票放逐(时间内可随时改票,到点结算)
 const DAY_HURRY_SECONDS = 5; // 白天全员投完后,把倒计时压到这么短 —— 留个改票窗口,不立即结算
 const PK_SECONDS = 30;      // 平票PK:平票者进入 PK,非平票的存活玩家重投一轮
+const WITCH_SECONDS = 25;   // 女巫用药:狼刀结算后单独一段(她要先看到刀口)
+const HUNTER_SECONDS = 20;  // 猎人开枪:出局后的即时反应,时间短
 
 // 房主可配的默认项。tiePk:白天平票是否进入 PK 加赛(默认开)。
 const DEFAULTS = { tiePk: true };
@@ -55,11 +68,12 @@ function shuffle(arr) {
 function createInitialState(players, config = {}) {
   const ids = players.map((p) => p.id);
   const nWolf = wolfCount(ids.length);
+  const nGod = Math.min(godCountFor(ids.length), Math.max(0, ids.length - nWolf - 1));
   const shuffled = shuffle(ids);
   const roles = {};
   shuffled.forEach((id, i) => {
     if (i < nWolf) roles[id] = ROLE.WOLF;
-    else if (i === nWolf) roles[id] = ROLE.SEER;   // 1 个预言家
+    else if (i < nWolf + nGod) roles[id] = GOD_ORDER[i - nWolf];
     else roles[id] = ROLE.VILLAGER;
   });
   return {
@@ -72,6 +86,11 @@ function createInitialState(players, config = {}) {
     round: 0,
     nightActions: {},                     // 本夜:{ wolfTargetVotes:{voterId:targetId}, seerCheck:{seerId,targetId} }
     seerResults: {},                      // { seerId: { [targetId]: 'wolf'|'good' } } 累积查验结果
+    // 女巫:两瓶药全局各一次。潜规则"首夜可自救,之后不能",所以要记住用药的夜次。
+    potions: { heal: true, poison: true },
+    // 猎人:开枪机会。被毒死不能开枪(标准规则),所以要区分死因,见 killPlayer。
+    hunterCanShoot: true,
+    pendingHunter: null,                  // 待开枪的猎人 id;非 hunter 阶段为 null
     votes: {},                            // 白天投票:{ voterId: targetId|null }(可改票)
     pkCandidates: null,                   // PK 加赛的候选人 [id,id];非 PK 阶段为 null
     ready: {},                            // 身份揭晓:已点"进入游戏"的玩家 { playerId: true }
@@ -143,9 +162,39 @@ function enterReveal(s) {
 function enterNight(s) {
   s.round += 1;
   s.phase = 'night';
-  s.nightActions = { wolfTargetVotes: {}, seerCheck: null };
+  s.nightActions = { wolfTargetVotes: {}, seerCheck: null, witch: null, victim: null };
   setDeadline(s, NIGHT_SECONDS);
   s.log.push({ type: 'phase', phase: 'night', round: s.round });
+}
+
+// 女巫要"看到刀口"才能决定救不救,所以夜晚必须分两段:
+// 先结算狼刀定下 victim,再单独给女巫一段时间用药。没有女巫时这一段直接跳过。
+function enterWitchTurn(s) {
+  s.phase = 'witch';
+  setDeadline(s, WITCH_SECONDS);
+}
+
+// 统一的死亡入口。所有让人出局的路径都走这里,好处是猎人的触发只写一次 ——
+// 漏掉任何一条路径,就会出现"某种死法猎人不开枪"的诡异 bug。
+// cause: 'wolf' | 'vote' | 'poison' | 'shot' | 'leave'
+// 返回是否触发了猎人开枪(调用方据此决定要不要停下来等他)。
+function killPlayer(s, id, cause) {
+  if (!id || !s.alive[id]) return false;
+  s.alive[id] = false;
+  // 猎人被毒死不能开枪(标准规则:毒药让他来不及反应)。其余死法都能。
+  if (s.roles[id] === ROLE.HUNTER && s.hunterCanShoot && cause !== 'poison') {
+    s.pendingHunter = id;
+    return true;
+  }
+  return false;
+}
+
+// 进入猎人开枪阶段。这是唯一会打断正常昼夜流转的阶段,结束后由 resumeAfterHunter
+// 回到本来该去的地方。
+function enterHunterTurn(s) {
+  s.phase = 'hunter';
+  setDeadline(s, HUNTER_SECONDS);
+  s.log.push({ type: 'hunter_turn', playerId: s.pendingHunter });
 }
 
 // 进入白天(讨论 + 投票同阶段):一进来即开放投票并倒计时。
@@ -157,20 +206,46 @@ function enterDay(s) {
   s.log.push({ type: 'phase', phase: 'day', round: s.round });
 }
 
-// 结算夜晚 → 进入白天
+// 夜晚第一段:定下狼刀的目标(还没真死 —— 女巫可能救)。
+// 有存活女巫就进 witch 阶段让她决定;否则直接结算。
 function resolveNight(s) {
-  // 狼人票数最高者出局(平票取先到,简化:取得票最多的第一个)
   const votes = s.nightActions.wolfTargetVotes || {};
   const tally = {};
   Object.values(votes).forEach((t) => { tally[t] = (tally[t] || 0) + 1; });
   let victim = null, max = 0;
   for (const [t, c] of Object.entries(tally)) { if (c > max) { max = c; victim = t; } }
 
-  if (victim && s.alive[victim]) { s.alive[victim] = false; s.lastNightVictim = victim; }
-  else s.lastNightVictim = null;
+  s.nightActions.victim = victim && s.alive[victim] ? victim : null;
 
+  const witch = s.players.find((p) => s.roles[p.id] === ROLE.WITCH && s.alive[p.id]);
+  const hasPotion = s.potions.heal || s.potions.poison;
+  if (witch && hasPotion && !s.absent[witch.id]) { enterWitchTurn(s); return; }
+  finishNight(s);
+}
+
+// 夜晚第二段:把狼刀 + 女巫用药的结果一并结算。
+// 救人只是取消狼刀,不是"复活",所以顺序上先看 heal 再落死亡。
+function finishNight(s) {
+  const w = s.nightActions.witch || {};
+  const victim = s.nightActions.victim;
+  const deaths = [];
+
+  if (victim && !w.heal) deaths.push({ id: victim, cause: 'wolf' });
+  if (w.poison) deaths.push({ id: w.poison, cause: 'poison' });
+
+  let hunterTriggered = false;
+  for (const d of deaths) {
+    if (killPlayer(s, d.id, d.cause)) hunterTriggered = true;
+  }
+
+  s.lastNightVictim = deaths.length ? deaths.map((d) => d.id) : null;
   s.log.push({ type: 'night_result', victim: s.lastNightVictim });
-  if (!checkWin(s)) enterDay(s);
+  s.nightActions.victim = null;
+
+  if (checkWin(s)) return;
+  // 猎人被刀/被毒(非毒)时先让他开枪,再进白天
+  if (hunterTriggered) { s.resumeTo = 'day'; enterHunterTurn(s); return; }
+  enterDay(s);
 }
 
 // 数票:返回得票最高者。max 为最高票数,leaders 为并列最高的所有人(可能 1 个或多个)。
@@ -186,10 +261,22 @@ function tallyVotes(votes) {
 
 // 放逐一名玩家并记日志、判胜负、进下一夜。out 为 null 表示无人出局。
 function exileAndAdvance(s, out) {
-  if (out && s.alive[out]) { s.alive[out] = false; s.lastVotedOut = out; }
-  else s.lastVotedOut = null;
+  const hunterTriggered = out && s.alive[out] ? killPlayer(s, out, 'vote') : false;
+  s.lastVotedOut = out && !s.alive[out] ? out : null;
   s.log.push({ type: 'vote_result', out: s.lastVotedOut });
-  if (!checkWin(s)) enterNight(s);
+  if (checkWin(s)) return;
+  // 被票出的猎人可以开枪带走一个,再进夜晚
+  if (hunterTriggered) { s.resumeTo = 'night'; enterHunterTurn(s); return; }
+  enterNight(s);
+}
+
+// 猎人开枪结束(开了或放弃/超时)→ 回到本来该去的阶段。
+function resumeAfterHunter(s) {
+  const to = s.resumeTo === 'night' ? 'night' : 'day';
+  s.pendingHunter = null;
+  s.resumeTo = null;
+  if (checkWin(s)) return;
+  if (to === 'night') enterNight(s); else enterDay(s);
 }
 
 // 结算白天投票:
@@ -278,6 +365,53 @@ function applyAction(s, action, playerId) {
       return { state: s, events };
     }
 
+    // 女巫用药。{ heal: true } 救刀口 / { poison: targetId } 毒一个 / 两者皆无 = 跳过。
+    // 同一夜只能用一瓶(标准规则),药用完不可再用。
+    case 'witch': {
+      if (s.phase !== 'witch') return { error: '非女巫行动阶段' };
+      if (!isAlive || s.roles[playerId] !== ROLE.WITCH) return { error: '只有存活女巫能用药' };
+      if (s.nightActions.witch) return { error: '今晚已经行动过了' };
+
+      const { heal, poison } = action;
+      if (heal && poison) return { error: '同一夜只能用一瓶药' };
+
+      if (heal) {
+        if (!s.potions.heal) return { error: '解药已经用过了' };
+        if (!s.nightActions.victim) return { error: '今晚没有人被刀' };
+        // 首夜可以自救,之后不行 —— 否则女巫近乎无敌
+        if (s.nightActions.victim === playerId && s.round > 1) return { error: '不能自救' };
+        s.potions.heal = false;
+        s.nightActions.witch = { heal: true };
+      } else if (poison) {
+        if (!s.potions.poison) return { error: '毒药已经用过了' };
+        if (!s.alive[poison]) return { error: '目标无效' };
+        if (poison === playerId) return { error: '不能毒自己' };
+        s.potions.poison = false;
+        s.nightActions.witch = { poison };
+      } else {
+        s.nightActions.witch = {};   // 明确跳过
+      }
+      finishNight(s);
+      return { state: s, events };
+    }
+
+    // 猎人开枪:出局瞬间带走一名存活玩家。target 为 null 表示放弃。
+    case 'hunter_shoot': {
+      if (s.phase !== 'hunter') return { error: '非猎人开枪阶段' };
+      if (playerId !== s.pendingHunter) return { error: '不是你开枪' };
+      s.hunterCanShoot = false;
+      const target = action.target;
+      if (target) {
+        if (!s.alive[target]) return { error: '目标无效' };
+        killPlayer(s, target, 'shot');   // 被猎人打死的若也是猎人,已用过枪不会再触发
+        s.log.push({ type: 'hunter_shot', playerId, target });
+      } else {
+        s.log.push({ type: 'hunter_shot', playerId, target: null });
+      }
+      resumeAfterHunter(s);
+      return { state: s, events };
+    }
+
     // 白天投票(讨论与投票同阶段):时间内可随时改票,target 为 null 即弃票。
     // 到倒计时结束才结算(见 tick),不提前结算 —— 保证承诺的"时间内可改票"始终成立。
     case 'vote': {
@@ -325,6 +459,14 @@ function applyAction(s, action, playerId) {
       } else if (s.phase === 'night') {
         // 未行动的狼人 → 空刀(不补随机目标,平安夜);预言家未查 → 跳过
         resolveNight(s);
+      } else if (s.phase === 'witch') {
+        // 女巫没在时限内用药 → 视为跳过,按原刀口结算
+        s.nightActions.witch = s.nightActions.witch || {};
+        finishNight(s);
+      } else if (s.phase === 'hunter') {
+        // 猎人没开枪 → 视为放弃
+        s.hunterCanShoot = false;
+        resumeAfterHunter(s);
       } else if (s.phase === 'day') {
         // 到点结算:未投的算弃票,平票视配置进 PK 或无人出局
         resolveVote(s);
@@ -392,6 +534,13 @@ function removePlayer(s, playerId) {
     enterNight(s);
   } else if (s.phase === 'night') {
     maybeResolveNight(s);
+  } else if (s.phase === 'witch' && s.roles[playerId] === ROLE.WITCH) {
+    // 全场都在等女巫,她掉线了 → 视为跳过,别让所有人干等到超时
+    s.nightActions.witch = s.nightActions.witch || {};
+    finishNight(s);
+  } else if (s.phase === 'hunter' && playerId === s.pendingHunter) {
+    s.hunterCanShoot = false;
+    resumeAfterHunter(s);
   } else if (s.phase === 'day' || s.phase === 'pk') {
     hurryDayIfAllVoted(s);   // 走的人若正好是剩下唯一没投的,压缩倒计时
   }
@@ -411,6 +560,12 @@ function eliminatePlayer(s, playerId) {
     enterNight(s);
   } else if (s.phase === 'night') {
     maybeResolveNight(s);
+  } else if (s.phase === 'witch' && s.roles[playerId] === ROLE.WITCH) {
+    s.nightActions.witch = s.nightActions.witch || {};
+    finishNight(s);
+  } else if (s.phase === 'hunter' && playerId === s.pendingHunter) {
+    s.hunterCanShoot = false;
+    resumeAfterHunter(s);
   } else if (s.phase === 'pk') {
     // 出局的若是 PK 候选人:剔除他;不足 2 人则 PK 无意义,直接结算
     s.pkCandidates = s.pkCandidates.filter((id) => id !== playerId);
@@ -472,6 +627,25 @@ function serializeStateFor(s, playerId) {
   // 预言家:能看到自己的查验结果
   if (myRole === ROLE.SEER) {
     view.seerResults = s.seerResults[playerId] || {};
+  }
+  // 女巫:能看到自己剩余的药,以及(仅在她行动的那一段)今晚的刀口。
+  // 刀口只发给女巫本人 —— 发给别人等于直接公开今晚谁死。
+  if (myRole === ROLE.WITCH) {
+    view.potions = s.potions;
+    if (s.phase === 'witch') {
+      view.witchVictim = s.nightActions.victim;
+      view.iActed = !!s.nightActions.witch;
+      // 首夜可自救,之后不行 —— 前端据此禁用解药按钮
+      view.canSelfHeal = s.round <= 1;
+    }
+  }
+  // 猎人:知道自己还能不能开枪(枪响过就没了)
+  if (myRole === ROLE.HUNTER) view.hunterCanShoot = s.hunterCanShoot;
+  // 猎人开枪阶段:全房间都知道"轮到猎人了"(公开信息,他已经出局),
+  // 但只有猎人本人拿到可开枪的标记
+  if (s.phase === 'hunter') {
+    view.pendingHunter = s.pendingHunter;
+    view.iAmShooting = playerId === s.pendingHunter;
   }
   // 身份揭晓:本人是否已就绪 + 就绪进度(等其他人点"进入游戏")
   if (s.phase === 'reveal') {
