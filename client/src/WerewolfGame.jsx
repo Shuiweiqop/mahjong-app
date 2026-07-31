@@ -75,6 +75,10 @@ export default function WerewolfGame({ state, act, me, socket }) {
   const shotKey = lastShot ? `${lastShot.playerId}->${lastShot.target}` : null;
   const [shownShot, setShownShot] = useState(null);
   const showGunshot = shotKey && shownShot !== shotKey;
+
+  // 放逐动画:天亮投票结算后进入下一夜时放一次。出局结果全场公开,无隐藏信息。
+  const [exiledRound, setExiledRound] = useState(null);
+  const showExile = state.lastVotedOut && state.phase === 'night' && exiledRound !== state.round;
   const chatEndRef = useRef(null);
   const membersRef = useRef(players);
   useEffect(() => { membersRef.current = players; });
@@ -215,6 +219,17 @@ export default function WerewolfGame({ state, act, me, socket }) {
               <BlockedReveal onDone={() => setSlashRound(state.round)} />
               <p style={{ textAlign: 'center', color: 'var(--accent)', fontWeight: 700 }}>
                 🛡️ 昨晚是平安夜
+              </p>
+            </div>
+          )}
+
+          {/* 放逐:票堆压垮牌面。全场公开信息。 */}
+          {showExile && (
+            <div style={{ marginBottom: 12 }}>
+              <ExileReveal name={nameOf(state.lastVotedOut)}
+                onDone={() => setExiledRound(state.round)} />
+              <p style={{ textAlign: 'center', color: 'var(--danger)', fontWeight: 700 }}>
+                🗳️ {nameOf(state.lastVotedOut)} 被放逐了
               </p>
             </div>
           )}
@@ -389,6 +404,85 @@ function BlockedReveal({ onDone }) {
   );
 }
 
+// 投票出局:一叠票从上方砸下,把牌压垮。
+// 出局结果本来就是全场公开的(lastVotedOut 发给所有人),没有隐藏信息。
+function ExileReveal({ name, onDone }) {
+  const [stage, setStage] = useState('idle');   // idle → drop → crush → done
+  useEffect(() => {
+    const t1 = setTimeout(() => setStage('drop'), 150);
+    const t2 = setTimeout(() => setStage('crush'), 700);
+    const t3 = setTimeout(() => { setStage('done'); onDone?.(); }, 2100);
+    return () => { clearTimeout(t1); clearTimeout(t2); clearTimeout(t3); };
+  }, [onDone]);
+
+  if (stage === 'done') return null;
+  const crushed = stage === 'crush';
+
+  return (
+    <div style={{ position: 'relative', width: 190, height: 150, margin: '0 auto 12px' }}>
+      <div style={{
+        position: 'absolute', left: 0, right: 0, bottom: 0,
+        height: crushed ? 46 : 150,
+        display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 4,
+        background: 'var(--surface-2)', border: '2px solid var(--border)', borderRadius: 12,
+        transform: crushed ? 'scaleX(1.08)' : 'none',
+        opacity: crushed ? 0.35 : 1,
+        overflow: 'hidden',
+        transition: 'height 0.5s cubic-bezier(0.6,0,0.8,0.4), transform 0.5s, opacity 1s ease-in 0.4s',
+      }}>
+        <div style={{ fontSize: 34 }}>🗳️</div>
+        <div style={{ fontWeight: 800, fontSize: 16 }}>{name}</div>
+      </div>
+      {/* 票堆:从上方砸下 */}
+      {stage !== 'idle' && (
+        <div className="exile-votes" style={{
+          position: 'absolute', left: '50%', top: 0, marginLeft: -34,
+          fontSize: 30, letterSpacing: -8, pointerEvents: 'none',
+        }}>🗳️🗳️🗳️</div>
+      )}
+    </div>
+  );
+}
+
+// 毒药生效:绿色从中心浸染开来,牌面渐渐枯萎。
+//
+// 只给女巫本人播。天亮后的公开播报里,被毒和被刀用的是同一个斩切动画 ——
+// lastNightVictim 是个不带死因的数组,好人本就无法区分谁是刀口谁是毒。
+// 给被毒者单独上绿色,等于把女巫用没用毒、毒了谁全公开,毒药就废了。
+function PoisonReveal({ name, onDone }) {
+  const [stage, setStage] = useState('idle');
+  useEffect(() => {
+    const t1 = setTimeout(() => setStage('seep'), 120);
+    const t2 = setTimeout(() => { setStage('done'); onDone?.(); }, 2000);
+    return () => { clearTimeout(t1); clearTimeout(t2); };
+  }, [onDone]);
+
+  if (stage === 'done') return null;
+
+  return (
+    <div style={{ position: 'relative', width: 190, height: 150, margin: '0 auto 12px', overflow: 'hidden', borderRadius: 12 }}>
+      <div style={{
+        position: 'absolute', inset: 0,
+        display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 6,
+        background: 'var(--surface-2)', border: '2px solid #4caf7d', borderRadius: 12,
+        filter: stage === 'seep' ? 'saturate(0.5) brightness(0.85)' : 'none',
+        transition: 'filter 1.4s ease-in',
+      }}>
+        <div style={{ fontSize: 38 }}>☠️</div>
+        <div style={{ fontWeight: 800, fontSize: 17 }}>{name}</div>
+        <div style={{ fontSize: 12, color: 'var(--muted)' }}>毒药已生效</div>
+      </div>
+      {stage === 'seep' && (
+        <div className="poison-seep" style={{
+          position: 'absolute', left: '50%', top: '55%', width: 12, height: 12,
+          marginLeft: -6, marginTop: -6, borderRadius: '50%', pointerEvents: 'none',
+          background: 'radial-gradient(circle, rgba(76,175,125,0.85) 0%, rgba(76,175,125,0.45) 55%, transparent 72%)',
+        }} />
+      )}
+    </div>
+  );
+}
+
 // 枪响:枪口闪光 + 目标牌被击中震颤后倒下。
 //
 // 只在"已经开完枪"时播 —— 打的是既成事实(谁被带走了是公开信息)。
@@ -476,6 +570,10 @@ function SpeechTurn({ state, act, nameOf }) {
 // 刀口(state.witchVictim)只会下发给女巫本人。
 function WitchActions({ state, act, nameOf, alivePlayers }) {
   const [mode, setMode] = useState(null);   // null | 'poison'(选毒药目标中)
+  // 刚下毒的目标,仅用于给女巫本人播一次浸染反馈。纯本地 —— 死因绝不外发:
+  // lastNightVictim 是个不带死因的数组,好人无法区分谁是刀口谁是毒,
+  // 给被毒者单独上绿色就等于把这个区分公开了。
+  const [poisoned, setPoisoned] = useState(null);
   const victim = state.witchVictim;
   const potions = state.potions || {};
   // 首夜可自救;之后刀口是自己就不能用解药
@@ -485,7 +583,15 @@ function WitchActions({ state, act, nameOf, alivePlayers }) {
   if (state.myRole !== 'witch') {
     return <p style={{ color: 'var(--muted)', textAlign: 'center' }}>🌙 天黑请闭眼,女巫行动中…</p>;
   }
-  if (state.iActed) return <WaitHint text="✓ 已行动,等待天亮…" />;
+  if (state.iActed) {
+    // 只有女巫自己看得到这个绿色浸染 —— 她本来就知道自己毒了谁
+    return (
+      <div>
+        {poisoned && <PoisonReveal name={nameOf(poisoned)} onDone={() => setPoisoned(null)} />}
+        <WaitHint text="✓ 已行动,等待天亮…" />
+      </div>
+    );
+  }
 
   if (mode === 'poison') {
     return (
@@ -494,7 +600,9 @@ function WitchActions({ state, act, nameOf, alivePlayers }) {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {alivePlayers.filter((p) => p.id !== state.myId).map((p) => (
             <button key={p.id} style={{ ...ui.btnGhost, color: 'var(--danger)' }}
-              onClick={() => act({ type: 'witch', poison: p.id })}>毒死 {p.name}</button>
+              onClick={() => { setPoisoned(p.id); act({ type: 'witch', poison: p.id }); }}>
+              毒死 {p.name}
+            </button>
           ))}
         </div>
         <button style={{ ...ui.btnGhost, marginTop: 8, width: '100%' }} onClick={() => setMode(null)}>

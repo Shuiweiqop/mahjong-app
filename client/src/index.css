@@ -126,10 +126,44 @@ input {
 }
 .hunter-aim { animation: aimLock 0.3s ease-out; }
 
+/* 毒药:绿色从中心慢慢浸染开 */
+@keyframes poisonSeep {
+  0%   { transform: scale(0); opacity: 0; }
+  20%  { opacity: 0.9; }
+  100% { transform: scale(26); opacity: 0; }
+}
+.poison-seep { animation: poisonSeep 1.6s ease-out forwards; }
+
+/* 放逐:票堆从上方砸下 */
+@keyframes votesDrop {
+  0%   { transform: translateY(-90px) rotate(-8deg); opacity: 0; }
+  45%  { transform: translateY(48px) rotate(2deg); opacity: 1; }
+  60%  { transform: translateY(38px) rotate(0deg); }
+  100% { transform: translateY(44px) rotate(0deg); opacity: 0; }
+}
+.exile-votes { animation: votesDrop 1.5s cubic-bezier(0.5, 0, 0.75, 0.3) forwards; }
+
+/* 你画我猜:猜中加分的数字弹跳上浮 */
+@keyframes scorePop {
+  0%   { transform: translateY(0) scale(0.6); opacity: 0; }
+  25%  { transform: translateY(-14px) scale(1.25); opacity: 1; }
+  60%  { transform: translateY(-22px) scale(1); opacity: 1; }
+  100% { transform: translateY(-40px) scale(0.95); opacity: 0; }
+}
+.score-pop {
+  animation: scorePop 1.3s cubic-bezier(0.2, 0.8, 0.3, 1) forwards;
+  position: absolute; right: 0; top: 0;
+  font-weight: 800; color: var(--accent); pointer-events: none;
+  white-space: nowrap;
+}
+
 /* 系统开启"减弱动态效果"时,不做位移/闪光类动画 —— 对前庭敏感的用户
    这类效果会引起不适。结果照常显示,只是不animate。 */
 @media (prefers-reduced-motion: reduce) {
-  .slash-blade, .block-blade, .block-spark, .gun-flash { animation: none; opacity: 0; }
+  .slash-blade, .block-blade, .block-spark, .gun-flash,
+  .poison-seep, .exile-votes { animation: none; opacity: 0; }
   .slash-wrap, .block-shield, .gun-hit, .hunter-wait, .hunter-aim { animation: none; }
   .slash-wrap *, .gun-hit { transition: none !important; }
+  /* 加分仍然显示,只是不做位移 */
+  .score-pop { animation: none; opacity: 1; transform: none; }
 }

@@ -15,6 +15,8 @@ export default function DrawGuessGame({ state, act, me, socket, onLeave }) {
   membersRef.current = state?.players || membersRef.current;
 
   const addMsg = (text, kind) => setMessages((m) => [...m.slice(-40), { text, kind, id: Math.random() }]);
+  // 计分板上的加分弹跳。动画播完自己移除。
+  const [pops, setPops] = useState([]);
 
   useEffect(() => {
     const t = setInterval(() => setNowTs(Date.now()), 500);
@@ -32,7 +34,11 @@ export default function DrawGuessGame({ state, act, me, socket, onLeave }) {
     };
     const onClear = () => strokeApi.current?.clear();
     const onChat = ({ playerId, text }) => addMsg(`${nameOf(playerId)}: ${text}`);
-    const onGuessed = ({ playerId, points }) => addMsg(`✅ ${nameOf(playerId)} 猜中了! (+${points})`, 'success');
+    const onGuessed = ({ playerId, points }) => {
+      addMsg(`✅ ${nameOf(playerId)} 猜中了! (+${points})`, 'success');
+      // 计分板上弹一下加分。用时间戳做 key,连续猜中能各弹各的。
+      setPops((prev) => [...prev.slice(-5), { id: Math.random(), playerId, points }]);
+    };
     const onReveal = ({ word }) => addMsg(`本轮答案是:${word}`, 'accent');
     const onGameOver = () => addMsg('🏁 游戏结束!', 'accent');
     s.on('stroke', onStroke); s.on('clear', onClear); s.on('chat', onChat);
@@ -129,10 +135,17 @@ export default function DrawGuessGame({ state, act, me, socket, onLeave }) {
           <div style={{ ...ui.card, marginBottom: 0, padding: 12 }}>
             <label style={ui.label}>计分板</label>
             {[...members].sort((a, b) => (state?.scores?.[b.id] || 0) - (state?.scores?.[a.id] || 0)).map((p) => (
-              <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 14, padding: '3px 0',
+              <div key={p.id} style={{ position: 'relative', display: 'flex', justifyContent: 'space-between',
+                fontSize: 14, padding: '3px 0',
                 color: state?.guessed?.includes(p.id) ? 'var(--success)' : 'var(--text)' }}>
                 <span>{p.id === state?.drawerId ? '✏️' : state?.guessed?.includes(p.id) ? '✅' : '·'} {p.name}</span>
                 <b>{state?.scores?.[p.id] || 0}</b>
+                {pops.filter((x) => x.playerId === p.id).map((x) => (
+                  <span key={x.id} className="score-pop"
+                    onAnimationEnd={() => setPops((prev) => prev.filter((y) => y.id !== x.id))}>
+                    +{x.points}
+                  </span>
+                ))}
               </div>
             ))}
           </div>

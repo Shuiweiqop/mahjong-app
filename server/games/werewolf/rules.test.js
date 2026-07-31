@@ -246,6 +246,34 @@ test('"被女巫救了"和"狼空刀"在玩家视图里必须完全一样', () =
   assert.strictEqual(view.witchVictim, undefined, '刀口只能给女巫本人');
 });
 
+test('夜晚死亡不带死因 —— 好人不能区分谁是刀口谁是被毒', () => {
+  // 前端的天亮播报因此必须对所有死者用同一个动画。给被毒的那张牌单独上绿色,
+  // 等于公开了女巫用没用毒、毒了谁,毒药的威慑就没了。
+  const s = ww.createInitialState(P(8), {});
+  ww.applyAction(s, { type: 'start' }, s.hostId);
+  s.players.forEach((p) => ww.applyAction(s, { type: 'ready' }, p.id));
+  const victim = s.players.map((p) => p.id).find((id) => s.roles[id] === 'villager' && s.alive[id]);
+  roleOf(s, 'wolf').forEach((w) => ww.applyAction(s, { type: 'wolf_kill', target: victim }, w));
+  const seer = roleOf(s, 'seer')[0];
+  if (s.phase === 'night' && seer) {
+    ww.applyAction(s, { type: 'seer_check', target: s.players.find((p) => p.id !== seer).id }, seer);
+  }
+  const witch = roleOf(s, 'witch')[0];
+  const poisonTarget = s.players.map((p) => p.id)
+    .find((id) => s.alive[id] && id !== witch && id !== victim);
+  ww.applyAction(s, { type: 'witch', poison: poisonTarget }, witch);
+
+  const observer = s.players.map((p) => p.id)
+    .find((id) => s.alive[id] && s.roles[id] !== 'witch');
+  const view = ww.serializeStateFor(s, observer);
+
+  assert.strictEqual(view.lastNightVictim.length, 2, '刀 + 毒应死两人');
+  // 死亡列表必须是一串纯 id,不带 cause/type 之类的死因标注
+  for (const entry of view.lastNightVictim) {
+    assert.strictEqual(typeof entry, 'string', '死亡条目应是纯 id,不能带死因');
+  }
+});
+
 // ── 房主配置(阶段时长) ──
 
 test('房主设置的阶段时长真的生效', () => {
