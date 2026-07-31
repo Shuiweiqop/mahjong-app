@@ -513,6 +513,46 @@ test('猎人被票出后开枪,再进夜晚', () => {
   assert.strictEqual(s.phase, 'night', '白天票出的猎人开完枪应进夜晚');
 });
 
+test('开枪前不泄露猎人瞄准了谁', () => {
+  // 瞄准过程必须只存在于猎人自己的浏览器里。要是为了做"瞄准动效"把中间状态
+  // 发上来,被瞄的人就能在扣扳机前抢先自辩,猎人的枪等于废了。
+  // 所以服务端在开枪前不该有任何指向目标的字段,log 里也不该有记录。
+  const s = ww.createInitialState(P(12), {});
+  ww.applyAction(s, { type: 'start' }, s.hostId);
+  s.players.forEach((p) => ww.applyAction(s, { type: 'ready' }, p.id));
+  const hunter = roleOf(s, 'hunter')[0];
+  s.phase = 'hunter'; s.pendingHunter = hunter; s.resumeTo = 'day';
+
+  const observer = s.players.map((p) => p.id).find((id) => id !== hunter && s.alive[id]);
+  const view = ww.serializeStateFor(s, observer);
+
+  assert.ok(
+    !(view.log || []).some((e) => e.type === 'hunter_shot'),
+    '还没开枪,log 里不该有开枪记录'
+  );
+  // pendingHunter 是公开的(大家都知道轮到猎人了),但不能有"目标"
+  assert.strictEqual(view.hunterTarget, undefined);
+  assert.strictEqual(view.aimingAt, undefined);
+});
+
+test('开枪后结果对所有人公开(动画据此播放)', () => {
+  const s = ww.createInitialState(P(12), {});
+  ww.applyAction(s, { type: 'start' }, s.hostId);
+  s.players.forEach((p) => ww.applyAction(s, { type: 'ready' }, p.id));
+  const hunter = roleOf(s, 'hunter')[0];
+  s.phase = 'hunter'; s.pendingHunter = hunter; s.resumeTo = 'day';
+  s.deadline = Date.now() + 20_000;
+
+  const target = s.players.map((p) => p.id).find((id) => id !== hunter && s.alive[id]);
+  ww.applyAction(s, { type: 'hunter_shoot', target }, hunter);
+
+  const observer = s.players.map((p) => p.id).find((id) => s.alive[id]);
+  const shot = (ww.serializeStateFor(s, observer).log || [])
+    .filter((e) => e.type === 'hunter_shot').pop();
+  assert.strictEqual(shot?.target, target, '开枪结果应写进公开日志');
+  assert.strictEqual(s.alive[target], false);
+});
+
 test('非猎人不能开枪;超时视为放弃', () => {
   const s = ww.createInitialState(P(12), {});
   ww.applyAction(s, { type: 'start' }, s.hostId);

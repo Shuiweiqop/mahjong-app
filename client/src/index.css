@@ -101,10 +101,35 @@ input {
 }
 .block-shield { animation: shieldBrace 0.9s ease-out; }
 
+/* 猎人开枪:枪口闪光从中心炸开,目标牌被击中一震后倒下。
+   只在开完枪(既成事实)时播;瞄准过程没有任何动画,否则等于提前
+   把枪口指向谁告诉全场。 */
+@keyframes gunFlash {
+  0%   { transform: scale(0); opacity: 0; }
+  15%  { transform: scale(7); opacity: 1; }
+  100% { transform: scale(14); opacity: 0; }
+}
+.gun-flash { animation: gunFlash 0.45s ease-out forwards; }
+@keyframes gunHit {
+  0%, 100% { transform: translate(0, 0); }
+  20% { transform: translate(6px, -3px); }
+  45% { transform: translate(-5px, 2px); }
+  70% { transform: translate(3px, -1px); }
+}
+.gun-hit { animation: gunHit 0.4s ease-out; }
+/* 等待猎人选择时的呼吸感(不指向任何人,只表示"在等") */
+.hunter-wait { animation: pulse 1.4s ease-in-out infinite; }
+/* 二次确认时的准星缩放 */
+@keyframes aimLock {
+  0% { transform: scale(1.35); opacity: 0.4; }
+  100% { transform: scale(1); opacity: 1; }
+}
+.hunter-aim { animation: aimLock 0.3s ease-out; }
+
 /* 系统开启"减弱动态效果"时,不做位移/闪光类动画 —— 对前庭敏感的用户
    这类效果会引起不适。结果照常显示,只是不animate。 */
 @media (prefers-reduced-motion: reduce) {
-  .slash-blade, .block-blade, .block-spark { animation: none; opacity: 0; }
-  .slash-wrap, .block-shield { animation: none; }
-  .slash-wrap * { transition: none !important; }
+  .slash-blade, .block-blade, .block-spark, .gun-flash { animation: none; opacity: 0; }
+  .slash-wrap, .block-shield, .gun-hit, .hunter-wait, .hunter-aim { animation: none; }
+  .slash-wrap *, .gun-hit { transition: none !important; }
 }

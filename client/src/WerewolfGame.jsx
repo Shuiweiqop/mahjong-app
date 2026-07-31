@@ -67,6 +67,14 @@ export default function WerewolfGame({ state, act, me, socket }) {
   const showNightResult = state.phase === 'speech' && slashRound !== state.round;
   const showSlash = showNightResult && victims.length > 0;
   const showBlocked = showNightResult && victims.length === 0 && state.round > 0;
+
+  // 枪响动画:从公开日志里读最后一次开枪。log 本来就全房间可见,
+  // 不需要服务端为动画新加字段 —— 谁被带走了本就是既成事实。
+  const log = state.log || [];
+  const lastShot = [...log].reverse().find((e) => e.type === 'hunter_shot' && e.target);
+  const shotKey = lastShot ? `${lastShot.playerId}->${lastShot.target}` : null;
+  const [shownShot, setShownShot] = useState(null);
+  const showGunshot = shotKey && shownShot !== shotKey;
   const chatEndRef = useRef(null);
   const membersRef = useRef(players);
   useEffect(() => { membersRef.current = players; });
@@ -207,6 +215,17 @@ export default function WerewolfGame({ state, act, me, socket }) {
               <BlockedReveal onDone={() => setSlashRound(state.round)} />
               <p style={{ textAlign: 'center', color: 'var(--accent)', fontWeight: 700 }}>
                 🛡️ 昨晚是平安夜
+              </p>
+            </div>
+          )}
+
+          {/* 枪响:开完枪后放一次。打的是既成事实,全场可见。 */}
+          {showGunshot && (
+            <div style={{ marginBottom: 12 }}>
+              <GunshotReveal name={nameOf(lastShot.target)}
+                onDone={() => setShownShot(shotKey)} />
+              <p style={{ textAlign: 'center', color: 'var(--danger)', fontWeight: 700 }}>
+                🔫 {nameOf(lastShot.playerId)} 开枪带走了 {nameOf(lastShot.target)}
               </p>
             </div>
           )}
@@ -370,6 +389,47 @@ function BlockedReveal({ onDone }) {
   );
 }
 
+// 枪响:枪口闪光 + 目标牌被击中震颤后倒下。
+//
+// 只在"已经开完枪"时播 —— 打的是既成事实(谁被带走了是公开信息)。
+// 瞄准过程绝不播动画:那会在扣扳机前就暴露枪口指向谁。
+function GunshotReveal({ name, onDone }) {
+  const [stage, setStage] = useState('idle');   // idle → fire → fall → done
+  useEffect(() => {
+    const t1 = setTimeout(() => setStage('fire'), 150);
+    const t2 = setTimeout(() => setStage('fall'), 550);
+    const t3 = setTimeout(() => { setStage('done'); onDone?.(); }, 2000);
+    return () => { clearTimeout(t1); clearTimeout(t2); clearTimeout(t3); };
+  }, [onDone]);
+
+  if (stage === 'done') return null;
+  const fell = stage === 'fall';
+
+  return (
+    <div style={{ position: 'relative', width: 190, height: 150, margin: '0 auto 12px' }}>
+      <div className={stage === 'fire' ? 'gun-hit' : undefined} style={{
+        position: 'absolute', inset: 0,
+        display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 6,
+        background: 'var(--surface-2)', border: '2px solid var(--danger)', borderRadius: 12,
+        transform: fell ? 'translateY(34px) rotate(9deg)' : 'none',
+        opacity: fell ? 0 : 1,
+        transition: 'transform 1.1s cubic-bezier(0.4,0,0.6,1), opacity 1.1s ease-in',
+      }}>
+        <div style={{ fontSize: 38 }}>🎯</div>
+        <div style={{ fontWeight: 800, fontSize: 17 }}>{name}</div>
+      </div>
+      {/* 枪口闪光:从中心炸开的一团白光 */}
+      {stage === 'fire' && (
+        <div className="gun-flash" style={{
+          position: 'absolute', left: '50%', top: '50%', width: 16, height: 16,
+          marginLeft: -8, marginTop: -8, borderRadius: '50%', pointerEvents: 'none',
+          background: 'radial-gradient(circle, #fff 0%, #ffe08a 40%, #ff8a3d 65%, transparent 75%)',
+        }} />
+      )}
+    </div>
+  );
+}
+
 // 轮流发言。一次只有一个人能说,其余人只能看 —— 这样狼没法靠刷屏
 // 把预言家的报点冲走。轮到自己时用下方的聊天框发言,说完点"过"。
 function SpeechTurn({ state, act, nameOf }) {
@@ -469,21 +529,54 @@ function WitchActions({ state, act, nameOf, alivePlayers }) {
 }
 
 // 猎人开枪。注意这个组件对"已出局"的猎人也要渲染 —— 他正是因为死了才开枪。
+//
+// 信息隔离的要点在"瞄准"这一步:猎人选目标的过程只存在于他自己的浏览器里
+// (下面的 aiming 是本地 state,不经过服务端),别人看到的永远只有"猎人正在
+// 选择"这一句。绝不要把瞄准中的目标发给服务端做什么"瞄准动效"—— 那等于在
+// 他扣扳机之前就把枪口指给全场看,被瞄的人可以抢先发言自辩。
 function HunterShot({ state, act, nameOf, alivePlayers }) {
+  // 本地瞄准态:仅用于二次确认,不上报。null = 还没选
+  const [aiming, setAiming] = useState(null);
+
   if (!state.iAmShooting) {
     return (
-      <p style={{ color: 'var(--muted)', textAlign: 'center' }}>
-        🔫 {nameOf(state.pendingHunter)} 是猎人,正在选择开枪目标…
-      </p>
+      <div style={{ textAlign: 'center' }}>
+        <div className="hunter-wait" style={{ fontSize: 40, marginBottom: 6 }}>🔫</div>
+        <p style={{ color: 'var(--muted)' }}>
+          {nameOf(state.pendingHunter)} 是猎人,正在选择开枪目标…
+        </p>
+      </div>
     );
   }
+
+  // 已选中目标 → 二次确认。开枪不可撤销,误点代价太大。
+  if (aiming) {
+    return (
+      <div style={{ textAlign: 'center' }}>
+        <p style={{ marginBottom: 10, fontWeight: 700 }}>🔫 确认开枪?</p>
+        <div className="hunter-aim" style={{
+          fontSize: 38, margin: '0 auto 10px', width: 76, height: 76, lineHeight: '76px',
+          borderRadius: '50%', border: '2px solid var(--danger)',
+        }}>🎯</div>
+        <p style={{ marginBottom: 12 }}>
+          带走 <b style={{ color: 'var(--danger)' }}>{nameOf(aiming)}</b>
+        </p>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <button style={{ ...ui.btnAccent, background: 'var(--danger)' }}
+            onClick={() => act({ type: 'hunter_shoot', target: aiming })}>确认开枪</button>
+          <button style={ui.btnGhost} onClick={() => setAiming(null)}>重新选择</button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div>
       <p style={{ marginBottom: 10, fontWeight: 700, textAlign: 'center' }}>🔫 你出局了 —— 开枪带走一人</p>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         {alivePlayers.map((p) => (
           <button key={p.id} style={{ ...ui.btnGhost, color: 'var(--danger)' }}
-            onClick={() => act({ type: 'hunter_shoot', target: p.id })}>开枪射杀 {p.name}</button>
+            onClick={() => setAiming(p.id)}>瞄准 {p.name}</button>
         ))}
         <button style={ui.btnGhost} onClick={() => act({ type: 'hunter_shoot', target: null })}>
           放弃开枪
