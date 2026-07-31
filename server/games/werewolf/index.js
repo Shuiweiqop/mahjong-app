@@ -96,13 +96,30 @@ const factionExists = (s, f) => Object.values(s.roles).some((r) => factionOf(r) 
 const factionWiped = (s, f) =>
   factionExists(s, f) && !aliveIds(s).some((id) => factionOf(s.roles[id]) === f);
 
-// 检查胜负;有结果则置 ended。屠边规则:
+// 每边至少要有几个神职,"屠神边"才算一个有意义的胜利条件。
+// 只有 1 个神(当前板子只有预言家)时屠神边会退化成"第一晚刀中某个特定的人就赢":
+// 实测狼盲刀的情况下,6 人局 20%、8 人局 17% 的对局在第一个白天开始前就结束,
+// 其他人一句话没说、一票没投。等以后加了女巫/猎人(FACTION.god 有 2 个以上成员),
+// 屠神边自动重新生效,不需要再改这里。
+const MIN_GODS_FOR_WIPE_RULE = 2;
+
+// 检查胜负;有结果则置 ended。
 //   好人胜 —— 狼人全部出局。
-//   狼人胜 —— 屠平民边(平民全灭)或屠神边(神职全灭)。
+//   狼人胜 —— 屠平民边;或屠神边(仅在神职足够多时);或狼人数 ≥ 好人数(狼可以强行
+//             票死任何人,已成定局,继续玩下去只是走流程)。
 // 阵营由 ROLE_FACTION 推导,加新角色无需改这里。
 function checkWin(s) {
   if (aliveWolves(s).length === 0) { s.winner = 'good'; s.phase = 'ended'; return true; }
-  if (factionWiped(s, FACTION.villager) || factionWiped(s, FACTION.god)) {
+
+  const wolves = aliveWolves(s).length;
+  const good = aliveIds(s).length - wolves;
+  const godCount = Object.values(s.roles).filter((r) => factionOf(r) === FACTION.god).length;
+
+  if (
+    wolves >= good ||
+    factionWiped(s, FACTION.villager) ||
+    (godCount >= MIN_GODS_FOR_WIPE_RULE && factionWiped(s, FACTION.god))
+  ) {
     s.winner = 'wolf'; s.phase = 'ended'; return true;
   }
   return false;

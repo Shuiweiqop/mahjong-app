@@ -138,6 +138,42 @@ test('PK 候选人不参与 PK 投票,且只能投候选人', () => {
 
 // ── 胜负 ──
 
+test('刀掉唯一的神职不会立刻结束游戏', () => {
+  // 屠神边只在神职足够多时才是有意义的胜利条件。当前板子只有 1 个神(预言家),
+  // 沿用屠神边等于"第一晚刀中某个特定的人就赢":实测狼盲刀时 6 人局 20%、
+  // 8 人局 17% 的对局在第一个白天开始前就结束,其他人一句话没说。
+  for (const n of [6, 8, 10, 12]) {
+    const s = nightState(n);
+    const seer = roleOf(s, 'seer')[0];
+    s.alive[seer] = false;
+    s.deadline = Date.now() - 1;
+    ww.applyAction(s, { type: 'tick' }, null);
+
+    assert.notStrictEqual(s.phase, 'ended', `${n} 人局:刀掉预言家后不该立即结束`);
+  }
+});
+
+test('狼人数 ≥ 好人数 → 狼胜(已成定局,不必走流程)', () => {
+  const s = nightState(8);
+  const wolves = roleOf(s, 'wolf');
+  const goods = s.players.map((p) => p.id).filter((id) => !wolves.includes(id));
+  // 留到只剩 (狼数) 个好人 —— 狼可以强行票死任何人
+  goods.slice(wolves.length).forEach((id) => { s.alive[id] = false; });
+
+  s.deadline = Date.now() - 1;
+  ww.applyAction(s, { type: 'tick' }, null);
+  assert.strictEqual(s.phase, 'ended');
+  assert.strictEqual(s.winner, 'wolf');
+});
+
+test('平民全灭 → 狼胜(屠民边仍然有效)', () => {
+  const s = nightState(12);
+  roleOf(s, 'villager').forEach((id) => { s.alive[id] = false; });
+  s.deadline = Date.now() - 1;
+  ww.applyAction(s, { type: 'tick' }, null);
+  assert.strictEqual(s.winner, 'wolf', '屠民边不受本次改动影响');
+});
+
 test('狼全出局 → 好人胜', () => {
   const s = nightState(6);
   roleOf(s, 'wolf').forEach((id) => { s.alive[id] = false; });
