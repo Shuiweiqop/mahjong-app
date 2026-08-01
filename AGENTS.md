@@ -114,11 +114,20 @@ English as a drive-by.
 - **`client` lint already has 4 pre-existing errors** (`react-hooks/refs` in `DrawCanvas.jsx`,
   `react-hooks/set-state-in-effect` in `Lobby.jsx`). Don't block on them; don't add more.
 
-Passing these does not mean correct. The contract tests cover the module interface and the
-info-hiding boundary — **there is no test of any actual game logic**, no phase-machine test, and
-nothing at all on the client. Verify game-logic changes by running both apps and playing through
-the affected flow in two browser windows (one incognito) — see `SETUP.md` §1. Append
-`?guest=<name>` to the URL to sit at multiple seats in one browser.
+77 tests across four files: `games/contract.test.js` (module interface + info-hiding),
+`games/werewolf/rules.test.js`, `games/drawguess/rules.test.js`, `routes/auth.test.js`.
+
+Passing these does not mean correct. **Nothing on the client is tested** — no component renders in
+any test, so every animation, disabled button, and phase panel is unverified by CI. The socket
+layer (`server.js`) and room lifecycle (`rooms.js`) have no direct tests either; they're only
+exercised indirectly. Verify game-logic changes by running both apps and playing through the
+affected flow in two browser windows (one incognito) — see `SETUP.md` §1. Append `?guest=<name>`
+to the URL to sit at multiple seats in one browser.
+
+When you fix a rules bug, add the test that would have caught it, then **verify the test actually
+fails against the old behaviour** — reintroduce the bug, watch it go red, restore. A test that
+passes both before and after your fix proves nothing, and it is easy to write one by accident
+(a mis-applied patch or a typo'd assertion looks identical to a passing suite).
 
 ## If none of the above matches
 

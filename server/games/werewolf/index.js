@@ -1,14 +1,23 @@
-// 狼人杀(Werewolf)—— 服务端权威游戏模块(核心版:狼人/预言家/平民)。
+// 狼人杀(Werewolf)—— 服务端权威游戏模块。
+// 角色:狼人 / 预言家 / 女巫 / 猎人 / 平民(神职按人数上场,见 godCountFor)。
 //
 // 实现平台统一游戏接口:
 //   createInitialState(players, config)
 //   applyAction(state, action, playerId) -> { state, events, error }
-//   serializeStateFor(state, playerId)   -> 分角色视图(狼人见同伴、预言家见查验、平民见公开)
+//   serializeStateFor(state, playerId)   -> 分角色视图(狼见同伴、预言家见查验、女巫见刀口)
 //   isGameOver(state)                    -> { over, winner } | false
 //
-// 阶段状态机: lobby → reveal(身份揭晓) → night → day(讨论+投票同阶段) → (循环) → ended
-// reveal 阶段不计时(等所有人点"进入游戏"),带宽限超时兜底;其余阶段到点由 tick 推进,避免死锁。
-// 纯逻辑,不碰 socket/db,便于测试。
+// 阶段状态机:
+//   lobby → reveal → night → [witch] → [hunter] → speech → day → [pk] → [hunter] → night → …
+//                                                                                    ↘ ended
+//   witch  仅在有存活女巫时插入(她要先看到刀口才能决定用不用解药)
+//   hunter 仅在猎人出局且可开枪时插入,结束后回 resumeTo 指定的阶段
+//   speech 轮流发言,一次只有一个人能说;说完才进 day 投票
+//   pk     白天平票且房主开了 tiePk 时插入
+//
+// 所有阶段时长由房主配置(见 DEFAULTS / TIME_OPTIONS),不写死。
+// 到点一律由服务端 tick 兜底推进,避免有人掉线/发呆时死锁。
+// 纯逻辑,不碰 socket/db,便于测试(见 rules.test.js)。
 
 const ROLE = { WOLF: 'wolf', SEER: 'seer', WITCH: 'witch', HUNTER: 'hunter', VILLAGER: 'villager' };
 

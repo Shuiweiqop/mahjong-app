@@ -4,8 +4,13 @@ import { ui } from './ui';
 
 // 狼人杀游戏界面(对局中)。
 // props: state(分角色视图), act(action=>void), me{id,name}, socket(ref,用于订阅聊天事件)
-// state.phase: reveal | night | day | pk | ended
-//   day/pk = 讨论 + 投票(有倒计时);pk = 平票加赛(仅非候选者可投候选人之一)
+// state.phase: reveal | night | witch | hunter | speech | day | pk | ended
+//   speech = 轮流发言(只有 state.iAmSpeaking 的人能说);day = 投票;pk = 平票加赛
+//
+// 动画的信息隔离约定:凡是"还没发生的选择"一律只存在于本地 state,不上报服务端 ——
+// 猎人的瞄准(HunterShot 的 aiming)、女巫的下毒目标(WitchActions 的 poisoned)都是如此。
+// 公开动画只用既成事实(lastNightVictim / lastVotedOut / log 里的 hunter_shot),
+// 且一夜多死时所有死者用同一个动画:死亡列表不带死因,区分它们就等于泄露女巫用没用毒。
 const ROLE_INFO = {
   wolf: { emoji: '🐺', name: '狼人', desc: '夜晚与同伴一起猎杀一名玩家' },
   seer: { emoji: '🔮', name: '预言家', desc: '每晚查验一名玩家的身份' },
