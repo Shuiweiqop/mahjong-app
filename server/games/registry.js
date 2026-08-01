@@ -3,10 +3,12 @@
 
 const drawguess = require('./drawguess');
 const werewolf = require('./werewolf');
+const kittens = require('./kittens');
 
 const games = {
   [drawguess.id]: drawguess,
   [werewolf.id]: werewolf,
+  [kittens.id]: kittens,
 };
 
 function getGame(id) {

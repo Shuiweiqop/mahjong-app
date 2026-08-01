@@ -157,11 +157,27 @@ input {
   white-space: nowrap;
 }
 
+/* 炸弹猫:抽到炸弹时牌炸开 */
+@keyframes kittenBlast {
+  0%   { transform: scale(0); opacity: 0; }
+  18%  { transform: scale(9); opacity: 1; }
+  100% { transform: scale(18); opacity: 0; }
+}
+.kitten-blast { animation: kittenBlast 0.5s ease-out forwards; }
+@keyframes kittenBoom {
+  0%   { transform: scale(1) rotate(0); }
+  15%  { transform: scale(1.15) rotate(-3deg); }
+  40%  { transform: scale(0.94) rotate(4deg); }
+  100% { transform: scale(0.9) rotate(0); opacity: 0.25; }
+}
+.kitten-boom { animation: kittenBoom 1.3s ease-out forwards; }
+
 /* 系统开启"减弱动态效果"时,不做位移/闪光类动画 —— 对前庭敏感的用户
    这类效果会引起不适。结果照常显示,只是不animate。 */
 @media (prefers-reduced-motion: reduce) {
   .slash-blade, .block-blade, .block-spark, .gun-flash,
-  .poison-seep, .exile-votes { animation: none; opacity: 0; }
+  .poison-seep, .exile-votes, .kitten-blast { animation: none; opacity: 0; }
+  .kitten-boom { animation: none; }
   .slash-wrap, .block-shield, .gun-hit, .hunter-wait, .hunter-aim { animation: none; }
   .slash-wrap *, .gun-hit { transition: none !important; }
   /* 加分仍然显示,只是不做位移 */

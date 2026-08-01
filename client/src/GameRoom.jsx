@@ -3,6 +3,7 @@ import { QRCodeSVG } from 'qrcode.react';
 import LobbySettings from './LobbySettings';
 import DrawGuessGame from './DrawGuessGame';
 import WerewolfGame from './WerewolfGame';
+import KittensGame from './KittensGame';
 import { ui } from './ui';
 
 // 房间路由器:管理通用的大厅(房间码/成员/设置/开始)与房间级 socket 事件
@@ -12,6 +13,7 @@ import { ui } from './ui';
 const GAME_VIEWS = {
   drawguess: DrawGuessGame,
   werewolf: WerewolfGame,
+  kittens: KittensGame,
 };
 
 export default function GameRoom({ socket, roomCode, me, onLeave }) {
