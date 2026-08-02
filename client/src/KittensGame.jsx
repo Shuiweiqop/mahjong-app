@@ -166,6 +166,24 @@ export default function KittensGame({ state, act, me }) {
             </div>
           )}
 
+          {/* 索要:被索要者自己挑一张给出去(索要者看不到他有什么) */}
+          {state.phase === 'favor' && (
+            state.iAmGiving ? (
+              <div style={{ padding: 12, borderRadius: 10, background: 'var(--surface-2)', marginBottom: 12 }}>
+                <div style={{ fontWeight: 800, marginBottom: 4, textAlign: 'center' }}>
+                  🤲 {nameOf(state.favorTo)} 向你索要一张牌
+                </div>
+                <div style={{ fontSize: 13, color: 'var(--muted)', marginBottom: 8, textAlign: 'center' }}>
+                  点下方手牌选一张给他 · 超时会随机给
+                </div>
+              </div>
+            ) : (
+              <p style={{ textAlign: 'center', color: 'var(--muted)', marginBottom: 12 }}>
+                🤲 {nameOf(state.favorTo)} 向 {nameOf(state.favorFrom)} 索要一张牌,等他挑…
+              </p>
+            )
+          )}
+
           {/* 拆弹:只有当事人能选位置 */}
           {state.phase === 'defusing' && (
             state.iAmDefusing
@@ -251,12 +269,17 @@ export default function KittensGame({ state, act, me }) {
           {/* 我的手牌 */}
           {!isSpectator && state.alive && (
             <>
-              <label style={ui.label}>我的手牌({hand.length} 张)</label>
+              <label style={ui.label}>
+                我的手牌({hand.length} 张)
+                {state.phase === 'favor' && state.iAmGiving && ' · 点一张给出去'}
+              </label>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 12 }}>
                 {hand.map((c, i) => {
                   const on = selected.includes(i);
+                  const giving = state.phase === 'favor' && state.iAmGiving;
                   return (
-                    <button key={i} onClick={() => toggleCard(i)}
+                    <button key={i}
+                      onClick={() => giving ? act({ type: 'give_card', index: i }) : toggleCard(i)}
                       className={c === 'bomb' ? 'kitten-bomb' : undefined}
                       style={{
                         padding: '8px 10px', borderRadius: 10, fontSize: 13, fontWeight: 700,

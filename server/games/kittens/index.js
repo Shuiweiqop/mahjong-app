@@ -7,9 +7,10 @@
 //   isGameOver(state)                    -> { over, ranking } | false
 //
 // 阶段状态机:
-//   lobby → playing ⇄ nope(否决响应窗口) → [defusing(选择炸弹插回位置)] → ended
+//   lobby → playing ⇄ nope → [favor] → [defusing] → ended
 //   playing  轮到的人可以出牌或抽牌;抽到炸弹且有拆弹 → defusing
 //   nope     刚打出一张功能牌,等其他人是否否决。否决本身也进这个窗口(可反否决)
+//   favor    被索要者挑一张牌给索要者(只有他能操作,索要者看不到他的手牌)
 //   defusing 只有当事人能操作:选炸弹塞回牌堆的位置
 //
 // 信息隔离的核心:state.deck(牌堆顺序)和 state.hands(每人手牌)绝不整份下发。
@@ -22,11 +23,13 @@ const DEFAULTS = {
   nopeSeconds: 6,      // 否决响应窗口:出功能牌后等多久看有没有人否决
   turnSeconds: 60,     // 单回合思考时间
   defuseSeconds: 20,   // 拆弹后选择炸弹插回位置的时间
+  favorSeconds: 20,    // 被索要时挑一张牌给出去的时间
 };
 const TIME_OPTIONS = {
   nopeSeconds: [3, 5, 6, 10],
   turnSeconds: [30, 45, 60, 90],
   defuseSeconds: [10, 20, 30],
+  favorSeconds: [10, 20, 30],
 };
 
 const now = () => Date.now();
@@ -79,6 +82,7 @@ function createInitialState(players, config = {}) {
     turnsLeft: 1,                     // 当前玩家还要打几个回合(攻击会叠加)
     pending: null,                     // 待结算的功能牌 { by, card, payload, nopes }
     defusing: null,                    // { playerId } 正在选炸弹插回位置
+    favor: null,                       // { from, to } 被索要者正在挑牌给索要者
     future: {},                        // { playerId: [card,card,card] } 洞悉未来的结果,仅本人可见
     lastAction: null,                  // 公开的最近一次动作播报
     ranking: [],                       // 出局顺序(倒序即名次)
@@ -209,15 +213,17 @@ function applyCardEffect(s, by, card, payload) {
       return;
 
     case CARD.FAVOR: {
+      // 原版:由被索要的人自己挑一张给出去(所以他会给最没用的那张)。
+      // 这需要一个等待阶段 —— 和拆弹一样,只有当事人能操作。
       const target = payload.target;
       if (target && s.alive[target] && s.hands[target]?.length) {
-        // 简化:随机给一张(原版是对方自选,那需要又一个等待阶段)
-        const hand = s.hands[target];
-        const i = Math.floor(Math.random() * hand.length);
-        const [got] = hand.splice(i, 1);
-        s.hands[by].push(got);
-        s.lastAction = { type: 'favor', by, target };
+        s.favor = { from: target, to: by };
+        s.phase = 'favor';
+        setDeadline(s, s.cfg.favorSeconds);
+        s.log.push({ type: 'favor_asked', playerId: by, target });
+        return;
       }
+      // 对方没牌可给:直接过
       s.phase = 'playing';
       setDeadline(s, s.cfg.turnSeconds);
       return;
@@ -279,6 +285,22 @@ function applyCardEffect(s, by, card, payload) {
       s.phase = 'playing';
       setDeadline(s, s.cfg.turnSeconds);
   }
+}
+
+// 把被索要者手里第 i 张牌交给索要者,回到索要者的回合。
+// 抽出成函数是因为有两个入口:本人主动给,和超时随机给。
+function giveFavorCard(s, index) {
+  const f = s.favor;
+  if (!f) return;
+  const hand = s.hands[f.from] || [];
+  const [got] = hand.splice(index, 1);
+  if (got) s.hands[f.to].push(got);
+  s.lastAction = { type: 'favor', by: f.to, target: f.from };
+  s.log.push({ type: 'favor_given', playerId: f.from, target: f.to });
+  s.favor = null;
+  // 回合仍属索要者 —— 索要不结束回合
+  s.phase = 'playing';
+  setDeadline(s, s.cfg.turnSeconds);
 }
 
 // 抽一张牌,结束回合。抽到炸弹要特殊处理。
@@ -464,10 +486,27 @@ function applyAction(s, action, playerId) {
       return { state: s, events };
     }
 
+    // 被索要者挑一张牌给对方。只有他自己能操作 —— 索要者不能替他选,
+    // 也看不到他有什么牌(这正是"给最没用的那张"这个博弈的前提)。
+    case 'give_card': {
+      if (s.phase !== 'favor' || !s.favor) return { error: '现在不用给牌' };
+      if (playerId !== s.favor.from) return { error: '不是你在给牌' };
+      const hand = s.hands[playerId] || [];
+      const i = typeof action.index === 'number' ? action.index : hand.indexOf(action.card);
+      if (i < 0 || i >= hand.length) return { error: '请选择一张手牌' };
+      giveFavorCard(s, i);
+      return { state: s, events };
+    }
+
     case 'tick': {
       if (s.phase === 'ended' || !s.deadline || now() < s.deadline) return { state: s, events };
       if (s.phase === 'nope') {
         resolvePending(s);
+      } else if (s.phase === 'favor') {
+        // 超时不给 → 随机抽一张给出去,避免拖延战术
+        const hand = s.hands[s.favor?.from] || [];
+        if (hand.length) giveFavorCard(s, Math.floor(Math.random() * hand.length));
+        else { s.favor = null; s.phase = 'playing'; setDeadline(s, s.cfg.turnSeconds); }
       } else if (s.phase === 'defusing') {
         // 超时:随机位置塞回
         const bomb = s.defusing?.bomb;
@@ -498,6 +537,12 @@ function removePlayer(s, playerId) {
   // 轮到掉线者时不要卡住:直接替他抽牌结束回合
   if (s.phase === 'playing' && currentPlayer(s) === playerId && presentIds(s).length) {
     drawCard(s, playerId);
+  }
+  // 正在给牌的人掉线 → 随机给一张,别让索要者干等满整个窗口
+  if (s.phase === 'favor' && s.favor?.from === playerId) {
+    const hand = s.hands[playerId] || [];
+    if (hand.length) giveFavorCard(s, Math.floor(Math.random() * hand.length));
+    else { s.favor = null; s.phase = 'playing'; setDeadline(s, s.cfg.turnSeconds); }
   }
 }
 
@@ -576,6 +621,14 @@ function serializeStateFor(s, playerId) {
     view.iCanNope = !!s.alive[playerId] && (s.hands[playerId] || []).includes(CARD.NOPE);
   }
 
+  // 索要:只有被索要者能挑牌。索要者看不到对方手里有什么 ——
+  // "给最没用的那张"这个博弈,前提就是索要者不知道对方在藏什么。
+  if (s.phase === 'favor' && s.favor) {
+    view.favorFrom = s.favor.from;
+    view.favorTo = s.favor.to;
+    view.iAmGiving = s.favor.from === playerId;
+  }
+
   // 拆弹:只有当事人能看到自己在拆弹并选择位置。别人只知道"有人在拆弹"。
   if (s.phase === 'defusing' && s.defusing) {
     view.defusingBy = s.defusing.playerId;
@@ -628,5 +681,7 @@ module.exports = {
                    unit: 's', label: '否决响应窗口', hint: '出功能牌后等待其他人否决的时间' },
     defuseSeconds: { type: 'options', options: TIME_OPTIONS.defuseSeconds, default: DEFAULTS.defuseSeconds,
                      unit: 's', label: '拆弹放置时长', hint: '选择炸弹塞回牌堆位置的时间' },
+    favorSeconds: { type: 'options', options: TIME_OPTIONS.favorSeconds, default: DEFAULTS.favorSeconds,
+                    unit: 's', label: '索要给牌时长', hint: '被索要时挑一张牌给对方;超时随机给' },
   },
 };

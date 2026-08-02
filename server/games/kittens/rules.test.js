@@ -321,6 +321,79 @@ test('三张/五张同样要过否决窗口', () => {
   assert.ok(s.hands[t].includes(CARD.DEFUSE), '被否决后对方保住了牌');
 });
 
+// ── 索要(被索要者自选) ──
+
+test('索要进入 favor 阶段,由被索要者自己挑牌', () => {
+  const s = started(4);
+  const me = cur(s);
+  const t = s.order.find((id) => id !== me);
+  s.hands[me] = [CARD.FAVOR, CARD.DEFUSE];
+  s.hands[t] = [CARD.SKIP, CARD.DEFUSE];
+
+  k.applyAction(s, { type: 'play', cards: [CARD.FAVOR], target: t }, me);
+  settle(s);
+  assert.strictEqual(s.phase, 'favor', '索要生效后应等对方挑牌');
+
+  // 对方会给最没用的那张 —— 这正是原版的博弈点
+  k.applyAction(s, { type: 'give_card', card: CARD.SKIP }, t);
+  assert.ok(s.hands[me].includes(CARD.SKIP), '索要者应拿到对方给的牌');
+  assert.ok(s.hands[t].includes(CARD.DEFUSE), '对方留下了想留的牌');
+  assert.strictEqual(s.phase, 'playing');
+  assert.strictEqual(cur(s), me, '索要不结束回合');
+});
+
+test('索要者看不到对方手牌,也不能替他选', () => {
+  // "给最没用的那张"这个博弈,前提就是索要者不知道对方在藏什么
+  const s = started(4);
+  const me = cur(s);
+  const t = s.order.find((id) => id !== me);
+  // 用一个只可能来自对方手牌的哨兵值,避免和自己的手牌/弃牌堆/日志混淆
+  const CANARY = '__only_in_target_hand__';
+  s.hands[me] = [CARD.FAVOR];
+  s.hands[t] = [CARD.SKIP, CANARY];
+  s.discard = [];
+  k.applyAction(s, { type: 'play', cards: [CARD.FAVOR], target: t }, me);
+  settle(s);
+
+  const view = k.serializeStateFor(s, me);
+  assert.strictEqual(view.iAmGiving, false);
+  assert.strictEqual(view.hands, undefined);
+
+  // 扫描整份视图(排除自己的手牌)。不能只检查已知字段名 —— 否则将来有人
+  // 为了做 UI 新加一个 targetHand 就漏过去了,而且不会有任何东西报错。
+  const dump = JSON.stringify({ ...view, myHand: null });
+  assert.ok(!dump.includes(CANARY),
+    '索要者的视图里不该出现对方手牌的任何内容');
+
+  assert.ok(k.applyAction(s, { type: 'give_card', index: 0 }, me).error, '不能替对方选牌');
+});
+
+test('索要超时随机给一张,不会卡住', () => {
+  const s = started(4);
+  const me = cur(s);
+  const t = s.order.find((id) => id !== me);
+  s.hands[me] = [CARD.FAVOR];
+  s.hands[t] = [CARD.SKIP];
+  k.applyAction(s, { type: 'play', cards: [CARD.FAVOR], target: t }, me);
+  settle(s);
+  assert.strictEqual(s.phase, 'favor');
+
+  settle(s);   // favor 阶段再超时
+  assert.strictEqual(s.phase, 'playing', '超时应自动给牌并继续');
+  assert.ok(s.hands[me].includes(CARD.SKIP));
+});
+
+test('对方没有手牌时索要直接跳过', () => {
+  const s = started(4);
+  const me = cur(s);
+  const t = s.order.find((id) => id !== me);
+  s.hands[me] = [CARD.FAVOR];
+  s.hands[t] = [];
+  k.applyAction(s, { type: 'play', cards: [CARD.FAVOR], target: t }, me);
+  settle(s);
+  assert.strictEqual(s.phase, 'playing', '没牌可给就不该进入等待阶段');
+});
+
 test('弃牌堆内容是公开的(五张需要据此挑牌)', () => {
   const s = started(4);
   s.discard = [CARD.SKIP, CARD.ATTACK];
