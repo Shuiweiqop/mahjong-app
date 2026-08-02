@@ -22,6 +22,8 @@ const CARD_INFO = {
   cat_rainbow: { name: '彩虹猫', emoji: '🌈' },
   cat_potato:  { name: '土豆猫', emoji: '🥔' },
   cat_pair:    { name: '偷牌',   emoji: '🐾' },
+  cat_three:   { name: '指名要牌', emoji: '🐾' },
+  cat_five:    { name: '弃牌堆捡牌', emoji: '🐾' },
 };
 const info = (c) => CARD_INFO[c] || { name: c, emoji: '🂠' };
 const ACTION_CARDS = ['attack', 'skip', 'favor', 'shuffle', 'future'];
@@ -90,26 +92,36 @@ export default function KittensGame({ state, act, me }) {
     setSelected((prev) => prev.includes(i) ? prev.filter((x) => x !== i) : [...prev, i]);
   };
 
+  const selectedCards = selected.map((i) => hand[i]);
+  const comboOf = (cards) => {
+    const allCats = cards.length > 0 && cards.every((c) => c.startsWith('cat_'));
+    const same = allCats && cards.every((c) => c === cards[0]);
+    if (cards.length === 2 && same) return 'cat_pair';
+    if (cards.length === 3 && same) return 'cat_three';
+    if (cards.length === 5 && allCats && new Set(cards).size === 5) return 'cat_five';
+    if (cards.length === 1 && ACTION_CARDS.includes(cards[0])) return cards[0];
+    return null;
+  };
+  const combo = comboOf(selectedCards);
+
   const playSelected = () => {
-    const cards = selected.map((i) => hand[i]);
-    if (!cards.length) return;
-    const isPair = cards.length === 2 && cards[0] === cards[1] && cards[0].startsWith('cat_');
-    const card = isPair ? 'cat_pair' : cards[0];
-    if (needsTarget(card)) { setTargeting({ cards, card }); return; }
-    act({ type: 'play', cards });
+    if (!combo) return;
+    // 三张要先报牌名、五张要先从弃牌堆挑,都要多一步选择
+    if (combo === 'cat_three' || combo === 'cat_five' || needsTarget(combo)) {
+      setTargeting({ cards: selectedCards, card: combo, target: null });
+      return;
+    }
+    act({ type: 'play', cards: selectedCards });
     setSelected([]);
   };
 
-  const confirmTarget = (targetId) => {
-    act({ type: 'play', cards: targeting.cards, target: targetId });
+  const finishPlay = (extra) => {
+    act({ type: 'play', cards: targeting.cards, ...extra });
     setTargeting(null);
     setSelected([]);
   };
 
-  const selectedCards = selected.map((i) => hand[i]);
-  const canPlay = selectedCards.length === 1
-    ? ACTION_CARDS.includes(selectedCards[0])
-    : selectedCards.length === 2 && selectedCards[0] === selectedCards[1] && selectedCards[0].startsWith('cat_');
+  const canPlay = !!combo;
 
   return (
     <div>
@@ -140,6 +152,7 @@ export default function KittensGame({ state, act, me }) {
               <div style={{ fontWeight: 800, marginBottom: 4 }}>
                 {nameOf(state.pending.by)} 打出了 {info(state.pending.card).emoji} {info(state.pending.card).name}
                 {state.pending.target && ` → ${nameOf(state.pending.target)}`}
+                {state.pending.wanted && `,要「${info(state.pending.wanted).name}」`}
               </div>
               <div style={{ fontSize: 13, color: 'var(--muted)', marginBottom: 8 }}>
                 {state.pending.nopeCount > 0
@@ -177,18 +190,61 @@ export default function KittensGame({ state, act, me }) {
             </div>
           )}
 
-          {/* 选目标 */}
+          {/* 出牌的第二步:选目标 / 报牌名 / 从弃牌堆挑 */}
           {targeting && (
             <div style={{ padding: 12, borderRadius: 10, background: 'var(--surface-2)', marginBottom: 12 }}>
-              <div style={{ fontWeight: 700, marginBottom: 8, textAlign: 'center' }}>选择目标玩家</div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                {players.filter((p) => p.alive && p.id !== me.id).map((p) => (
-                  <button key={p.id} style={ui.btnGhost} onClick={() => confirmTarget(p.id)}>
-                    {p.name}({p.handCount} 张)
-                  </button>
-                ))}
-                <button style={{ ...ui.btnGhost, color: 'var(--muted)' }} onClick={() => setTargeting(null)}>取消</button>
-              </div>
+              {targeting.card === 'cat_five' ? (
+                <>
+                  <div style={{ fontWeight: 700, marginBottom: 8, textAlign: 'center' }}>
+                    🐾 从弃牌堆挑一张
+                  </div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+                    {[...new Set(state.discard || [])].map((c) => (
+                      <button key={c} style={{ ...ui.btnGhost, padding: '6px 10px' }}
+                        onClick={() => finishPlay({ wanted: c })}>
+                        {info(c).emoji} {info(c).name}
+                      </button>
+                    ))}
+                    {!(state.discard || []).length && (
+                      <span style={{ color: 'var(--muted)', fontSize: 13 }}>弃牌堆是空的</span>
+                    )}
+                  </div>
+                </>
+              ) : !targeting.target ? (
+                <>
+                  <div style={{ fontWeight: 700, marginBottom: 8, textAlign: 'center' }}>选择目标玩家</div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 8 }}>
+                    {players.filter((p) => p.alive && p.id !== me.id).map((p) => (
+                      <button key={p.id} style={ui.btnGhost}
+                        onClick={() => targeting.card === 'cat_three'
+                          ? setTargeting({ ...targeting, target: p.id })
+                          : finishPlay({ target: p.id })}>
+                        {p.name}({p.handCount} 张)
+                      </button>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div style={{ fontWeight: 700, marginBottom: 4, textAlign: 'center' }}>
+                    🐾 向 {nameOf(targeting.target)} 指名要一张牌
+                  </div>
+                  <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 8, textAlign: 'center' }}>
+                    他有就必须给,没有则落空(所有人都会看到结果)
+                  </div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+                    {/* cat_pair/cat_three/cat_five 是组合出的伪牌名,不是真实牌,不能要 */}
+                    {Object.keys(CARD_INFO).filter((c) => !['cat_pair', 'cat_three', 'cat_five'].includes(c)).map((c) => (
+                      <button key={c} style={{ ...ui.btnGhost, padding: '6px 10px' }}
+                        onClick={() => finishPlay({ target: targeting.target, wanted: c })}>
+                        {info(c).emoji} {info(c).name}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+              <button style={{ ...ui.btnGhost, color: 'var(--muted)', width: '100%' }}
+                onClick={() => setTargeting(null)}>取消</button>
             </div>
           )}
 

@@ -238,6 +238,43 @@ function applyCardEffect(s, by, card, payload) {
       return;
     }
 
+    case 'cat_three': {
+      // 三张同款 → 指名要牌:对方有就必须给,没有则落空。
+      // 落空也要公开播报 —— "他没有拆弹"本身就是有价值的公开信息,
+      // 这正是三张牌的战术意义(试探)。
+      const target = payload.target;
+      const wanted = payload.wanted;
+      let got = null;
+      if (target && s.alive[target]) {
+        const hand = s.hands[target] || [];
+        const i = hand.indexOf(wanted);
+        if (i >= 0) {
+          [got] = hand.splice(i, 1);
+          s.hands[by].push(got);
+        }
+      }
+      s.lastAction = { type: 'demand', by, target, wanted, success: !!got };
+      s.log.push({ type: 'demand', playerId: by, target, wanted, success: !!got });
+      s.phase = 'playing';
+      setDeadline(s, s.cfg.turnSeconds);
+      return;
+    }
+
+    case 'cat_five': {
+      // 五张不同 → 从弃牌堆任选一张。弃牌堆是公开的,拿走什么大家都看得到。
+      const wanted = payload.wanted;
+      const i = s.discard.indexOf(wanted);
+      if (i >= 0) {
+        const [got] = s.discard.splice(i, 1);
+        s.hands[by].push(got);
+        s.lastAction = { type: 'salvage', by, wanted };
+        s.log.push({ type: 'salvage', playerId: by, wanted });
+      }
+      s.phase = 'playing';
+      setDeadline(s, s.cfg.turnSeconds);
+      return;
+    }
+
     default:
       s.phase = 'playing';
       setDeadline(s, s.cfg.turnSeconds);
@@ -340,20 +377,56 @@ function applyAction(s, action, playerId) {
       const cards = Array.isArray(action.cards) ? action.cards : [];
       if (!cards.length) return { error: '没有选牌' };
 
-      // 成对猫咪:两张同款 → 偷牌
-      if (cards.length === 2 && cards[0] === cards[1] && CAT_CARDS.includes(cards[0])) {
+      const allCats = cards.every((c) => CAT_CARDS.includes(c));
+      const sameCat = allCats && cards.every((c) => c === cards[0]);
+      const needTarget = () => {
+        if (!action.target || !s.alive[action.target] || action.target === playerId) {
+          return '请选择一名有效的目标玩家';
+        }
+        return null;
+      };
+
+      // 两张同款 → 随机偷一张
+      if (cards.length === 2 && sameCat) {
         const rest = takeFromHand(s.hands[playerId], cards);
         if (!rest) return { error: '你没有这些牌' };
-        if (!action.target || !s.alive[action.target] || action.target === playerId) {
-          return { error: '请选择一名有效的目标玩家' };
-        }
+        const bad = needTarget();
+        if (bad) return { error: bad };
         s.hands[playerId] = rest;
         s.discard.push(...cards);
         openNopeWindow(s, playerId, 'cat_pair', { target: action.target });
         return { state: s, events };
       }
 
-      if (cards.length !== 1) return { error: '一次只能出一张功能牌,或两张同款猫咪' };
+      // 三张同款 → 指名要牌:说出一个牌名,对方有就必须给,没有则落空。
+      // 这是唯一能定向拿到指定牌(比如拆弹)的手段,所以要求先报牌名。
+      if (cards.length === 3 && sameCat) {
+        const rest = takeFromHand(s.hands[playerId], cards);
+        if (!rest) return { error: '你没有这些牌' };
+        const bad = needTarget();
+        if (bad) return { error: bad };
+        if (!action.wanted || !CARD_INFO[action.wanted]) return { error: '请指定要什么牌' };
+        s.hands[playerId] = rest;
+        s.discard.push(...cards);
+        openNopeWindow(s, playerId, 'cat_three', { target: action.target, wanted: action.wanted });
+        return { state: s, events };
+      }
+
+      // 五张各不相同 → 从弃牌堆任选一张。弃牌堆本来就是公开信息,不涉及隐藏。
+      if (cards.length === 5 && allCats && new Set(cards).size === 5) {
+        const rest = takeFromHand(s.hands[playerId], cards);
+        if (!rest) return { error: '你没有这些牌' };
+        if (!action.wanted || !CARD_INFO[action.wanted]) return { error: '请从弃牌堆指定一张牌' };
+        if (!s.discard.includes(action.wanted)) return { error: '弃牌堆里没有这张牌' };
+        s.hands[playerId] = rest;
+        s.discard.push(...cards);
+        openNopeWindow(s, playerId, 'cat_five', { wanted: action.wanted });
+        return { state: s, events };
+      }
+
+      if (cards.length !== 1) {
+        return { error: '只能出:一张功能牌 / 两张或三张同款猫咪 / 五张不同猫咪' };
+      }
       const card = cards[0];
       if (!ACTION_CARDS.includes(card)) return { error: '这张牌不能单独打出' };
       if (card === CARD.FAVOR) {
@@ -481,6 +554,8 @@ function serializeStateFor(s, playerId) {
     deckCount: s.deck.length,                     // 只给剩余张数,不给顺序
     discardTop: s.discard[s.discard.length - 1] ?? null,
     discardCount: s.discard.length,
+    // 弃牌堆内容是公开的(桌上摊着的牌),五张不同猫咪要从这里挑
+    discard: [...s.discard],
     log: s.log.slice(-30),
     lastAction: s.lastAction,
     hostId: s.hostId,
@@ -494,6 +569,8 @@ function serializeStateFor(s, playerId) {
       by: s.pending.by,
       card: s.pending.card,
       target: s.pending.payload?.target ?? null,
+      // 要什么牌是公开的 —— 大家听得到他喊"给我拆弹",这也是决定要不要否决的依据
+      wanted: s.pending.payload?.wanted ?? null,
       nopeCount: s.pending.nopes.length,
     };
     view.iCanNope = !!s.alive[playerId] && (s.hands[playerId] || []).includes(CARD.NOPE);

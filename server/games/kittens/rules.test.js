@@ -231,6 +231,103 @@ test('猫咪牌必须成对且需要目标', () => {
     '偷牌必须指定目标');
 });
 
+// ── 三张 / 五张猫咪 ──
+
+const settle = (s) => { s.deadline = Date.now() - 1; k.applyAction(s, { type: 'tick' }, null); };
+
+test('三张同款:指名要牌,对方有就必须给', () => {
+  const s = started(4);
+  const me = cur(s);
+  const t = s.order.find((id) => id !== me);
+  s.hands[me] = [CARD.CAT_TACO, CARD.CAT_TACO, CARD.CAT_TACO];
+  s.hands[t] = [CARD.DEFUSE, CARD.SKIP];
+
+  const r = k.applyAction(s,
+    { type: 'play', cards: [CARD.CAT_TACO, CARD.CAT_TACO, CARD.CAT_TACO], target: t, wanted: CARD.DEFUSE }, me);
+  assert.ok(!r.error, r.error);
+  settle(s);
+
+  assert.ok(s.hands[me].includes(CARD.DEFUSE), '应拿到指名的牌');
+  assert.ok(!s.hands[t].includes(CARD.DEFUSE), '对方应失去该牌');
+});
+
+test('三张同款:对方没有该牌则落空,且结果公开', () => {
+  // 落空本身是有价值的公开信息("他没有拆弹"),这正是三张牌的试探价值
+  const s = started(4);
+  const me = cur(s);
+  const t = s.order.find((id) => id !== me);
+  s.hands[me] = [CARD.CAT_MELON, CARD.CAT_MELON, CARD.CAT_MELON];
+  s.hands[t] = [CARD.SKIP];
+
+  k.applyAction(s,
+    { type: 'play', cards: [CARD.CAT_MELON, CARD.CAT_MELON, CARD.CAT_MELON], target: t, wanted: CARD.DEFUSE }, me);
+  settle(s);
+
+  assert.strictEqual(s.lastAction.type, 'demand');
+  assert.strictEqual(s.lastAction.success, false, '落空要如实记录');
+  assert.ok(s.log.some((e) => e.type === 'demand' && e.success === false), '落空要进公开日志');
+});
+
+test('三张必须报牌名,且必须同款', () => {
+  const s = started(4);
+  const me = cur(s);
+  const t = s.order.find((id) => id !== me);
+  s.hands[me] = [CARD.CAT_TACO, CARD.CAT_TACO, CARD.CAT_TACO];
+  assert.ok(k.applyAction(s,
+    { type: 'play', cards: [CARD.CAT_TACO, CARD.CAT_TACO, CARD.CAT_TACO], target: t }, me).error,
+    '不报牌名应被拒');
+
+  s.hands[me] = [CARD.CAT_TACO, CARD.CAT_TACO, CARD.CAT_MELON];
+  assert.ok(k.applyAction(s,
+    { type: 'play', cards: [CARD.CAT_TACO, CARD.CAT_TACO, CARD.CAT_MELON], target: t, wanted: CARD.SKIP }, me).error,
+    '三张不同款应被拒');
+});
+
+test('五张不同:从弃牌堆捡走指定的牌', () => {
+  const s = started(4);
+  const me = cur(s);
+  const five = [CARD.CAT_TACO, CARD.CAT_MELON, CARD.CAT_BEARD, CARD.CAT_RAINBOW, CARD.CAT_POTATO];
+  s.hands[me] = [...five];
+  s.discard = [CARD.SKIP, CARD.DEFUSE, CARD.ATTACK];
+
+  k.applyAction(s, { type: 'play', cards: five, wanted: CARD.DEFUSE }, me);
+  settle(s);
+
+  assert.ok(s.hands[me].includes(CARD.DEFUSE), '应从弃牌堆拿到牌');
+  assert.ok(!s.discard.includes(CARD.DEFUSE), '弃牌堆里该牌应被取走');
+});
+
+test('五张不能要弃牌堆里没有的牌', () => {
+  const s = started(4);
+  const me = cur(s);
+  const five = [CARD.CAT_TACO, CARD.CAT_MELON, CARD.CAT_BEARD, CARD.CAT_RAINBOW, CARD.CAT_POTATO];
+  s.hands[me] = [...five];
+  s.discard = [CARD.SKIP];
+  assert.ok(k.applyAction(s, { type: 'play', cards: five, wanted: CARD.DEFUSE }, me).error);
+});
+
+test('三张/五张同样要过否决窗口', () => {
+  const s = started(4);
+  const me = cur(s);
+  const t = s.order.find((id) => id !== me);
+  s.hands[me] = [CARD.CAT_TACO, CARD.CAT_TACO, CARD.CAT_TACO];
+  s.hands[t] = [CARD.NOPE, CARD.DEFUSE];
+
+  k.applyAction(s,
+    { type: 'play', cards: [CARD.CAT_TACO, CARD.CAT_TACO, CARD.CAT_TACO], target: t, wanted: CARD.DEFUSE }, me);
+  assert.strictEqual(s.phase, 'nope', '要牌也能被否决');
+  k.applyAction(s, { type: 'nope' }, t);
+  settle(s);
+  assert.ok(s.hands[t].includes(CARD.DEFUSE), '被否决后对方保住了牌');
+});
+
+test('弃牌堆内容是公开的(五张需要据此挑牌)', () => {
+  const s = started(4);
+  s.discard = [CARD.SKIP, CARD.ATTACK];
+  const view = k.serializeStateFor(s, s.order[1]);
+  assert.deepStrictEqual(view.discard, [CARD.SKIP, CARD.ATTACK], '弃牌堆是桌面公开信息');
+});
+
 // ── 胜负 ──
 
 test('只剩一人时结束,名次按出局顺序倒推', () => {
