@@ -18,7 +18,30 @@ const DEFAULTS = { drawSeconds: 80, roundsPerPlayer: 2, categories: [], customWo
 const DRAW_SECONDS_OPTIONS = [45, 60, 80, 120];
 const ROUNDS_OPTIONS = [1, 2, 3];
 
+// 单轮笔画上限。strokes 只在换轮时清空,轮内只增不减;画布是归一化坐标,
+// 2 万段足够画满一整轮(实测正常作画 60 秒约 1 万段)。到顶后丢弃新笔画而不是报错 ——
+// 画手不该因为画得多被打断,而是"画不下了"这种可理解的降级。
+const MAX_STROKES = 20000;
+// 单条 stroke 消息的段数上限,挡住一次性塞爆内存的恶意消息(实测 20 万段 = 22MB 视图)。
+const MAX_STROKES_PER_MSG = 500;
+const GUESS_MAX = 100;          // 单条猜测/发言最大长度(狼人杀那边是 CHAT_MAX=300)
+
 const now = () => Date.now();
+
+// 只保留画布真正需要的字段,并把坐标夹回 0..1 —— 客户端可以伪造任意对象,
+// 原样存进 state 就会连同垃圾一起广播给所有人并被持久重绘。
+function sanitizeStroke(s) {
+  if (!s || typeof s !== 'object') return null;
+  const pt = (p) => Array.isArray(p) && p.length >= 2
+    && Number.isFinite(+p[0]) && Number.isFinite(+p[1])
+    ? [Math.min(1, Math.max(0, +p[0])), Math.min(1, Math.max(0, +p[1]))]
+    : null;
+  const from = pt(s.from), to = pt(s.to);
+  if (!from || !to) return null;
+  const size = Number.isFinite(+s.size) ? Math.min(64, Math.max(1, +s.size)) : 4;
+  const color = typeof s.color === 'string' && /^#[0-9a-fA-F]{3,8}$/.test(s.color) ? s.color : '#000000';
+  return { from, to, color, size };
+}
 
 // 规整房主传入的配置,防非法值
 function normalizeConfig(cfg = {}) {
@@ -49,7 +72,10 @@ function createInitialState(players, config) {
     word: null,                     // 当前词(仅内部/画手可见)
     usedWords: [],
     guessedThisRound: {},           // { playerId: pointsAwarded }
+    absent: {},                     // 掉线玩家 { playerId: true };不轮到、不计入"全猜中"
+    pausedRemainMs: null,           // 房间无连接时挂起的剩余时长(见 pauseClock)
     strokes: [],                    // 当前轮已画笔画(用于中途加入者补画)
+    strokeRev: 0,                   // 画布版本号:每次清空/换轮 +1,前端据此判断要不要全量重绘
     deadline: null,                 // 当前阶段截止时间戳(ms)
     hostId: players[0]?.id || null,
     cfg,                            // 保存配置供后续使用
@@ -68,11 +94,19 @@ function startNextTurn(state) {
     return events;
   }
 
+  if (state.order.length === 0) {           // 全员掉线兜底
+    state.phase = 'ended';
+    state.drawerId = null;
+    state.deadline = null;
+    events.push({ type: 'game_over' });
+    return events;
+  }
   state.turnIndex = (state.turnIndex + 1) % state.order.length;
   state.drawerId = state.order[state.turnIndex];
   state.phase = 'pick';
   state.word = null;
   state.strokes = [];
+  state.strokeRev = (state.strokeRev || 0) + 1;   // 换轮:画布作废,前端需清屏
   state.guessedThisRound = {};
   state.wordChoices = pickWords(3, state.usedWords, state.wordPool).map((w) => w.word);
   state.deadline = now() + PICK_SECONDS * 1000;
@@ -98,6 +132,14 @@ function endRound(state, reason) {
 //   { type:'tick' }                         服务端计时器驱动(检查是否到点)
 function applyAction(state, action, playerId) {
   const events = [];
+
+  // 观战者(以及任何不在本局里的 id)不能行动。tick 是服务端驱动的,playerId 为 null。
+  // 不挡住的话观战者能"猜词":猜中会进 scores 与 guessedThisRound,而
+  // serializeStateFor 正是按 guessedThisRound 决定给不给 word —— 于是观战者
+  // 猜一次就把答案拿到手了,还能靠提前凑满"全员猜中"直接结束本轮。
+  if (action.type !== 'tick' && !state.players.some((p) => p.id === playerId)) {
+    return { error: '你不是本局玩家' };
+  }
 
   switch (action.type) {
     case 'start': {
@@ -125,8 +167,18 @@ function applyAction(state, action, playerId) {
       if (state.phase !== 'draw') return { error: '当前不能作画' };
       if (playerId !== state.drawerId) return { error: '只有画手能画' };
       // 支持一批笔画(降延迟)或单笔(兼容)
-      const strokes = action.strokes || (action.stroke ? [action.stroke] : []);
+      const raw = action.strokes || (action.stroke ? [action.stroke] : []);
+      if (!Array.isArray(raw)) return { error: '笔画格式错误' };
+      // 校验 + 限量:超出单轮上限的部分直接丢弃(不报错,见 MAX_STROKES 注释)
+      const room = Math.max(0, MAX_STROKES - state.strokes.length);
+      const strokes = raw
+        .slice(0, MAX_STROKES_PER_MSG)
+        .map(sanitizeStroke)
+        .filter(Boolean)
+        .slice(0, room);
+      if (!strokes.length) return { state, events };   // 全被丢弃:静默,不打断画手
       for (const s of strokes) state.strokes.push(s);
+      // 只广播本批(增量),不是全量 —— 全量只在中途加入时经 serializeStateFor 补发
       events.push({ type: 'stroke', strokes, forOthers: true });
       return { state, events };
     }
@@ -135,6 +187,7 @@ function applyAction(state, action, playerId) {
       if (state.phase !== 'draw') return { error: '当前不能清空' };
       if (playerId !== state.drawerId) return { error: '只有画手能清空' };
       state.strokes = [];
+      state.strokeRev = (state.strokeRev || 0) + 1;
       events.push({ type: 'clear' });
       return { state, events };
     }
@@ -144,7 +197,9 @@ function applyAction(state, action, playerId) {
       if (playerId === state.drawerId) return { error: '画手不能猜' };
       if (state.guessedThisRound[playerId]) return { error: '你已经猜中了' };
 
-      const guess = (action.text || '').trim();
+      // 截断而不是拒绝:猜错的内容会作为聊天广播,没有上限就等于给了每个人一个
+      // 任意长度的广播通道(实测 10 万字原样转发)。狼人杀那边同理,见 CHAT_MAX。
+      const guess = String(action.text || '').trim().slice(0, GUESS_MAX);
       const correct = guess === state.word;
 
       if (correct) {
@@ -156,9 +211,11 @@ function applyAction(state, action, playerId) {
         state.scores[state.drawerId] = (state.scores[state.drawerId] || 0) + 25;
         events.push({ type: 'guessed', playerId, points: pts });
 
-        // 所有非画手都猜中 → 提前结束本轮
-        const guessers = state.players.filter((p) => p.id !== state.drawerId);
-        const allGuessed = guessers.every((p) => state.guessedThisRound[p.id]);
+        // 所有在场的非画手都猜中 → 提前结束本轮(掉线者不计,否则永远凑不齐)
+        const guessers = state.players.filter(
+          (p) => p.id !== state.drawerId && !state.absent[p.id]
+        );
+        const allGuessed = guessers.length > 0 && guessers.every((p) => state.guessedThisRound[p.id]);
         if (allGuessed) events.push(...endRound(state, 'all_guessed'));
         return { state, events };
       } else {
@@ -171,6 +228,7 @@ function applyAction(state, action, playerId) {
     case 'tick': {
       // 服务端计时器:检查当前阶段是否到点,推进状态
       if (!state.deadline || now() < state.deadline) return { state, events };
+      if (!state.drawerId) return { state, events };   // 轮转空(全掉线挂起中),无可推进
       if (state.phase === 'pick') {
         // 画手没选 → 自动选第一个
         if (state.wordChoices.length) {
@@ -189,19 +247,126 @@ function applyAction(state, action, playerId) {
   }
 }
 
+// ── 掉线/重连 ──────────────────────────────────────────────
+// 掉线者移出画手轮转,并且不再计入"全员猜中"。分数保留,重连可继续。
+function removePlayer(state, playerId) {
+  if (!state || state.phase === 'ended') return [];
+  if (!state.order.includes(playerId) && !state.absent[playerId]) return [];
+  state.absent[playerId] = true;
+
+  const idx = state.order.indexOf(playerId);
+  if (idx !== -1) {
+    state.order.splice(idx, 1);
+    // 维持 turnIndex 指向"当前画手"的语义:删掉的位置在当前之前(或就是当前)时前移,
+    // 否则下一次 +1 会跳过一个人 / 重复当前这个人。
+    if (idx <= state.turnIndex) state.turnIndex -= 1;
+  }
+
+  // 轮转里没人了:不就地结束对局 —— 全员短暂掉线(如切网)后仍应能重连续玩。
+  // 只把当前轮挂起(没有画手可选),真正的结束交给上层宽限期超时后的清理。
+  // 注意 startNextTurn 对空 order 取模会得到 NaN,所以这里必须提前返回。
+  // deadline 不在这里动:停表由上层按"房间还有没有连接"决定(见 pauseClock)。
+  if (state.order.length === 0) {
+    state.drawerId = null;
+    return [];
+  }
+
+  // 当前画手掉线 → 本轮作废,立刻进入下一轮(否则空转到超时)
+  if (playerId === state.drawerId && (state.phase === 'pick' || state.phase === 'draw')) {
+    return startNextTurn(state);
+  }
+
+  // 掉线的可能是大家在等的最后一个猜者 → 重新检查能否提前结束本轮
+  if (state.phase === 'draw') {
+    const guessers = state.players.filter(
+      (p) => p.id !== state.drawerId && !state.absent[p.id]
+    );
+    if (guessers.length > 0 && guessers.every((p) => state.guessedThisRound[p.id])) {
+      return endRound(state, 'all_guessed');
+    }
+  }
+  return [];
+}
+
+// 重连:恢复在场并放回轮转队尾(分数一直保留)
+function restorePlayer(state, playerId) {
+  if (!state || !state.absent[playerId]) return [];
+  delete state.absent[playerId];
+  if (state.phase === 'ended') return [];
+  if (!state.order.includes(playerId)) state.order.push(playerId);
+  // 曾因轮转清空被挂起(无画手)→ 有人回来了,重新开一轮
+  if (!state.drawerId && state.phase !== 'lobby') {
+    state.turnIndex = -1;
+    state.pausedRemainMs = null;   // 重开一轮会设新 deadline,旧的挂起值作废
+    return startNextTurn(state);
+  }
+  return [];
+}
+
+// 宽限期超时仍未回来 → 永久移出,并按剩余人数收缩总轮数。
+// roundsTotal 开局按人数算死,不收缩的话 4 人局走 1 人后剩 3 人仍要打满 8 轮。
+function eliminatePlayer(state, playerId) {
+  if (!state || state.phase === 'ended') return [];
+  const events = removePlayer(state, playerId) || [];
+  delete state.absent[playerId];
+  state.players = state.players.filter((p) => p.id !== playerId);
+
+  // 按当前人数重算总轮数;已打过的轮数不退,故不低于 roundsDone
+  const target = state.players.length * state.cfg.roundsPerPlayer;
+  state.roundsTotal = Math.max(state.roundsDone, target);
+  if (state.roundsDone >= state.roundsTotal && state.phase !== 'ended') {
+    state.phase = 'ended';
+    state.drawerId = null;
+    state.deadline = null;
+    return [...events, { type: 'game_over' }];
+  }
+  return events;
+}
+
+// ── 停表/恢复(由上层在"房间内一个连接都没有 / 有人重连"时调用) ──
+// 理由同 werewolf:deadline 是绝对时间戳,停表期间会继续走。
+function pauseClock(state) {
+  if (!state || state.phase === 'ended' || state.deadline == null) return;
+  state.pausedRemainMs = Math.max(0, state.deadline - now());
+  state.deadline = null;
+}
+
+function resumeClock(state) {
+  if (!state || state.phase === 'ended' || state.pausedRemainMs == null) return;
+  state.deadline = now() + state.pausedRemainMs;
+  state.pausedRemainMs = null;
+}
+
+// 谁需要整块画布?只有"收不到增量"的人:
+//   - 掉线/中途加入者(absent,或根本不在本局 order 里 —— 观战者走的就是这条)
+//   - 画布刚被清空/换轮(strokes 为空,发个空数组让前端清屏,代价为零)
+// 在场玩家靠 'stroke' 事件持续收增量,不需要每次广播都收全量。
+// 注意别在这里改 state:serializeStateFor 每次广播对每个玩家都会调用,
+// 在里面记"已同步"会让同一次广播的结果取决于成员遍历顺序。
+function strokesFor(state, playerId) {
+  if (!state.strokes.length) return [];
+  const inGame = state.order.includes(playerId) && !state.absent[playerId];
+  return inGame ? undefined : state.strokes;
+}
+
 // ── 序列化视图(信息隔离:画手可见词,猜者不可见) ──────────
 function serializeStateFor(state, playerId) {
   const isDrawer = playerId === state.drawerId;
   const view = {
     phase: state.phase,
-    players: state.players,
+    players: state.players.map((p) => ({ ...p, absent: !!state.absent[p.id] })),
     scores: state.scores,
     drawerId: state.drawerId,
     roundsDone: state.roundsDone,
     roundsTotal: state.roundsTotal,
     deadline: state.deadline,
     hostId: state.hostId,
-    strokes: state.strokes,                 // 中途加入者可据此补画
+    // 笔画不进常规视图:增量已经由 'stroke' 事件单独广播,这里再带一份全量,
+    // 等于每次有人猜词(chat 也走 broadcastState)就给每个人重发整块画布 ——
+    // 实测正常画满一轮后单人视图 1.2MB,8 人房一次广播近 10MB。
+    // 全量只在真正需要补画时下发(见下方 strokesFor)。
+    strokes: strokesFor(state, playerId),
+    strokeRev: state.strokeRev,             // 画布版本号,前端据此判断是否需要重绘
     guessed: Object.keys(state.guessedThisRound),
     isDrawer,
   };
@@ -239,6 +404,11 @@ module.exports = {
   applyAction,
   serializeStateFor,
   isGameOver,
+  removePlayer,
+  restorePlayer,
+  eliminatePlayer,
+  pauseClock,
+  resumeClock,
   // 房主配置元数据(供前端设置面板)
   configSchema: {
     drawSeconds: { options: DRAW_SECONDS_OPTIONS, default: DEFAULTS.drawSeconds },

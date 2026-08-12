@@ -29,8 +29,12 @@ function createRoom(gameId, creator) {
     game,
     hostId: creator.id,
     members: [{ id: creator.id, name: creator.name }],
+    spectators: [],    // 中途进来的观战者(不参与对局,不占 maxPlayers)
     state: null,       // 开始前为 null
     config: {},        // 房主在大厅设置的游戏配置
+    // 观战者是否可见全部身份(上帝视角)。默认关闭:开着的话同局玩家开个小号
+    // 进来观战就能看穿全场。由房主在大厅显式打开。
+    spectatorGodView: false,
     timer: null,
   };
   rooms.set(code, room);
@@ -45,9 +49,30 @@ function getRoom(code) {
 function joinRoom(code, member) {
   const room = getRoom(code);
   if (!room) return { error: '房间不存在' };
-  if (room.state && room.state.phase !== 'lobby') {
-    // 已开始:允许作为观战/等待下一局?现阶段先允许加入成员列表(旁观)
+
+  // 重连:该 id 本来就在这局里 → 坐回原座位(不占新名额,不受满员限制)
+  const inGame = room.state && room.state.players?.some((p) => p.id === member.id);
+  if (inGame) {
+    if (!room.members.find((m) => m.id === member.id)) {
+      room.members.push({ id: member.id, name: member.name });
+    }
+    const events = room.game.restorePlayer
+      ? room.game.restorePlayer(room.state, member.id) || []
+      : [];
+    return { room, rejoined: true, events };
   }
+
+  // 对局已开始且此人不属于这局 → 作为观战者加入(不进 state.players,没有角色,
+  // 不占 maxPlayers 名额)。观战者不能行动,视图由 spectatorViewFor 单独生成。
+  // 注意:createInitialState 建出来的 state 初始 phase 就是 'lobby'(要等 start 动作才推进),
+  // 所以"是否已开局"要看 state 是否存在,不能看 phase。
+  if (room.state) {
+    if (!room.spectators.find((s) => s.id === member.id)) {
+      room.spectators.push({ id: member.id, name: member.name });
+    }
+    return { room, spectator: true };
+  }
+
   if (room.members.length >= room.game.maxPlayers) return { error: '房间已满' };
   if (!room.members.find((m) => m.id === member.id)) {
     room.members.push({ id: member.id, name: member.name });
@@ -55,18 +80,64 @@ function joinRoom(code, member) {
   return { room };
 }
 
-// 离开房间;若空则销毁
+// 离开房间;若空则销毁。
+// 返回受影响的游戏事件(如画手掉线导致换轮),调用方据此广播。
 function leaveRoom(code, memberId) {
   const room = getRoom(code);
-  if (!room) return;
+  if (!room) return [];
+
+  // 观战者离开:不影响对局,直接摘掉
+  if (room.spectators.some((s) => s.id === memberId)) {
+    room.spectators = room.spectators.filter((s) => s.id !== memberId);
+    if (room.members.length === 0 && room.spectators.length === 0) {
+      clearTimer(room);
+      rooms.delete(room.code);
+    }
+    return [];
+  }
+
   room.members = room.members.filter((m) => m.id !== memberId);
-  if (room.members.length === 0) {
+
+  // 同步对局状态:成员列表和 state 是两份数据,不同步就会留下"幽灵玩家"
+  //(仍被算作存活/仍在轮转里),导致流程卡在等一个永远不会行动的人。
+  // 走到 leaveRoom 说明是真的离开(宽限期已过或主动退出),用 eliminatePlayer
+  // 判其出局并重跑胜负 —— 只标 absent 的话唯一的狼退出后好人永远赢不了。
+  let events = [];
+  if (room.state) {
+    const drop = room.game.eliminatePlayer || room.game.removePlayer;
+    if (drop) events = drop(room.state, memberId) || [];
+  }
+
+  // 玩家全走光但还有观战者:房间不能销毁,否则观战者卡在一个已不存在的房间里
+  //(sync 什么都拿不到)。等观战者也走完再回收(见上面的观战者分支)。
+  if (room.members.length === 0 && room.spectators.length === 0) {
     clearTimer(room);
     rooms.delete(room.code);
-    return;
+    return [];
   }
-  // 房主离开 → 转移房主
-  if (room.hostId === memberId) room.hostId = room.members[0].id;
+  // 房主离开 → 转移房主(state.hostId 也要跟着变,否则局内房主动作会认错人)
+  if (room.members.length === 0) return events;   // 只剩观战者,无房主可转移
+  if (room.hostId === memberId) {
+    room.hostId = room.members[0].id;
+    if (room.state) room.state.hostId = room.hostId;
+  }
+  return events;
+}
+
+// 观战者视图。
+// 基线:用一个"不存在的玩家 id"调游戏模块的 serializeStateFor —— 该 id 没有角色,
+// 拿到的天然就是纯公开信息(不会泄露任何人的身份),不需要各游戏另写一套逻辑。
+// 房主开启上帝视角后,再附加 roles;对局结束时本来就公开身份,不受开关影响。
+const SPECTATOR_ID = '__spectator__';
+function spectatorViewFor(room) {
+  const view = room.game.serializeStateFor(room.state, SPECTATOR_ID);
+  view.spectator = true;
+  view.myId = null;
+  view.myRole = null;
+  view.spectators = room.spectators;
+  view.spectatorGodView = room.spectatorGodView;
+  if (room.spectatorGodView && room.state.roles) view.roles = room.state.roles;
+  return view;
 }
 
 // 开始对局(用当前成员 + 房主配置创建初始状态)
@@ -74,6 +145,20 @@ function startGame(room) {
   room.state = room.game.createInitialState(room.members, room.config);
   room.state.hostId = room.hostId;
   return room.state;
+}
+
+// 再来一局:清回大厅,复用现有的大厅/开始流程。
+// 上一局的观战者(中途进来的)转正为正式成员 —— 新一局他们能真正参与;
+// 若因此超出 maxPlayers 则截断(先到先得)。config 保留,让"相同配置再来"顺滑。
+function resetToLobby(room) {
+  clearTimer(room);
+  for (const sp of room.spectators) {
+    if (room.members.length >= room.game.maxPlayers) break;
+    if (!room.members.find((m) => m.id === sp.id)) room.members.push(sp);
+  }
+  room.spectators = [];
+  room.state = null;
+  return room;
 }
 
 function clearTimer(room) {
@@ -87,6 +172,8 @@ module.exports = {
   joinRoom,
   leaveRoom,
   startGame,
+  resetToLobby,
   clearTimer,
   generateRoomCode,
+  spectatorViewFor,
 };

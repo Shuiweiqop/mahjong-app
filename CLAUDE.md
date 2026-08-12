@@ -17,5 +17,6 @@ information hiding.
 
 ## More
 - Agent working rules — invariants, the live-vs-legacy server trap, permission boundaries,
-  and the game-module contract — are in [AGENTS.md](AGENTS.md) and [docs/game-module.md](docs/game-module.md). Read AGENTS.md first.
+  and the game-module contract — are in [AGENTS.md](AGENTS.md), [docs/game-module.md](docs/game-module.md),
+  and [docs/rooms-and-sockets.md](docs/rooms-and-sockets.md). Read AGENTS.md first.
 - Architecture, local dev, deployment, env vars, and troubleshooting live in [SETUP.md](SETUP.md).

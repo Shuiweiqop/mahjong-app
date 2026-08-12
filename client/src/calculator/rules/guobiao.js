@@ -128,23 +128,26 @@ function calcStandardGB(decomp, context) {
     return { fan, yaku };
   }
 
-  if (!context.hasOpen && melds.every(m => m.type === 'tri')) {
-    addYaku('四暗刻', 64, '四组自摸刻子未副露');
-    return { fan, yaku };
+  // 四暗刻要求"暗"——未副露 *且* 自摸。荣和时最后一组是明刻,只能算对对和。
+  // 另外这里不能像其他番种那样直接 return:清一色(24番)写在下面,提前返回
+  // 会让"清一色四暗刻"这种牌永远少算 24 番。改为记下番种继续往下走。
+  const isFourConcealed = !context.hasOpen && context.selfDraw && melds.every(m => m.type === 'tri');
+  if (isFourConcealed) {
+    addYaku('四暗刻', 64, '四组暗刻(门清自摸)');
   }
 
   // ── 48番 ────────────────────────────────────────────────
 
+  // 这几个 48 番的番种都必然是清一色(同花色四组),提前 return 会把下面的
+  // 清一色 24 番吃掉。国标里它们与清一色是可以复合的,所以只记番不返回。
   const siFourSame = checkSameSuitFourIdentical(melds);
   if (siFourSame) {
     addYaku('一色四同顺', 48, '同花色四组完全相同的顺子');
-    return { fan, yaku };
   }
 
   const fourStepTri = checkSameSuitFourStepTriplets(melds);
   if (fourStepTri) {
     addYaku('一色四节高', 48, '同花色四组数字依次递增1的刻子');
-    return { fan, yaku };
   }
 
   // ── 32番 ────────────────────────────────────────────────
@@ -199,7 +202,8 @@ function calcStandardGB(decomp, context) {
     return { fan, yaku };
   }
 
-  if (!context.hasOpen) {
+  // 三暗刻不能和四暗刻叠加 —— 四组暗刻已经把三组包含在内了(国标"不重复计算"原则)
+  if (!context.hasOpen && !isFourConcealed) {
     const triCount = melds.filter(m => m.type === 'tri').length;
     if (triCount >= 3) {
       addYaku('三暗刻', 16, '三组暗刻');
@@ -246,25 +250,32 @@ function calcStandardGB(decomp, context) {
 
   // ── 4番 ─────────────────────────────────────────────────
 
+  // 这一档的 fan === 0 守卫原本是想避免高番牌型重复计小番,但"不求人"讲的是
+  // 和牌方式(门清自摸),而"全带幺/断幺/平和"讲的是牌型 —— 两者不是同一个维度,
+  // 互相挡住是错的。实测 234m567m345p678s55p(标准断幺平和)门清自摸只拿到
+  // 不求人4+自摸1+门前清2 = 7 番,断幺 4 番被"不求人"吃掉,结果 7 < 8 判不能和。
+  //
+  // 牌型这三个之间才是互斥的(手牌不可能既全带幺又断幺),用 shapeFan 单独串起来,
+  // 与"不求人"各走各的。
+  const shapeFanBefore = fan;
   const allWithTerminal = decomp.every(m => m.tiles.some(t => isTerminalOrHonor(t)));
-  if (allWithTerminal && fan === 0) {
-    addYaku('全带幺', 4, '每组面子和对子都含幺九牌');
-  }
-
-  if (!context.hasOpen && context.selfDraw && fan === 0) {
-    addYaku('不求人', 4, '门清手牌自摸');
-  }
-
   const noTerminal = allTiles.every(t => !isTerminalOrHonor(t));
-  if (noTerminal && fan === 0) {
-    addYaku('断幺', 4, '手牌无幺九牌和字牌');
-  }
-
-  // ── 平和 ─────────────────────────────────────────────────
   const allSeq = melds.every(m => m.type === 'seq');
   const pairNotHonor = pair && !isHonor(pair.tiles[0]);
-  if (allSeq && pairNotHonor && fan === 0) {
+
+  if (allWithTerminal && shapeFanBefore === 0) {
+    addYaku('全带幺', 4, '每组面子和对子都含幺九牌');
+  } else if (noTerminal && shapeFanBefore === 0) {
+    addYaku('断幺', 4, '手牌无幺九牌和字牌');
+  } else if (allSeq && pairNotHonor && shapeFanBefore === 0) {
     addYaku('平和', 2, '四组顺子加非字牌对子');
+  }
+
+  // 不求人 = 门清 + 自摸,已经把两者含在内,所以下面的通用加分要跳过它们,
+  // 否则同一件事算三遍(实测会多出 3 番)。
+  const isSelfDrawConcealed = !context.hasOpen && context.selfDraw;
+  if (isSelfDrawConcealed) {
+    addYaku('不求人', 4, '门清手牌自摸');
   }
 
   // ── 通用加分 ─────────────────────────────────────────────
@@ -287,8 +298,11 @@ function calcStandardGB(decomp, context) {
     if (seatMeld) addYaku('门风刻', 2, '自己门风刻子');
   }
 
-  if (context.selfDraw) addYaku('自摸', 1, '自摸和牌');
-  if (!context.hasOpen) addYaku('门前清', 2, '手牌未副露');
+  // 已计"不求人"时不再单独计自摸/门前清 —— 不求人本身就是这两者的合称
+  if (!isSelfDrawConcealed) {
+    if (context.selfDraw) addYaku('自摸', 1, '自摸和牌');
+    if (!context.hasOpen) addYaku('门前清', 2, '手牌未副露');
+  }
 
   // 最少 8 番才算和牌（国标规则）
   if (fan < 8) {

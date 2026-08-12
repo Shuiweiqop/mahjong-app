@@ -32,7 +32,7 @@ app.get('/api/health', (req, res) => res.json({ ok: true }));
 
 // ── Socket 认证:允许登录用户(带 token)或访客(带 guest 身份) ──
 io.use((socket, next) => {
-  const { token, guestName } = socket.handshake.auth || {};
+  const { token, guestName, guestId } = socket.handshake.auth || {};
   if (token) {
     try {
       const u = jwt.verify(token, JWT_SECRET);
@@ -43,17 +43,35 @@ io.use((socket, next) => {
     }
   }
   if (guestName) {
-    socket.user = { id: `g:${socket.id}`, name: guestName };
+    // 优先用客户端持久化的 guestId:重连后 id 不变,可坐回原座位。
+    // 老客户端没传 guestId 时退回 socket.id(重连即换身份,行为同旧版)。
+    const stable = typeof guestId === 'string' && /^[\w-]{1,64}$/.test(guestId);
+    socket.user = { id: `g:${stable ? guestId : socket.id}`, name: guestName };
     return next();
   }
   next(new Error('需要登录或提供访客名'));
 });
 
 // ── 广播房间状态(每个玩家收到各自视图,信息隔离) ──
+// 玩家视图 = 游戏模块的分角色视图 + 房间级的观战信息(让玩家知道有谁在旁观)。
+// sync 与 broadcastState 共用,避免两处各拼一次导致字段漂移。
+function playerViewFor(room, playerId) {
+  const view = room.game.serializeStateFor(room.state, playerId);
+  view.spectators = room.spectators;
+  view.spectatorGodView = room.spectatorGodView;
+  return view;
+}
+
 function broadcastState(room, extraEvents = []) {
   for (const m of room.members) {
-    const view = room.game.serializeStateFor(room.state, m.id);
-    io.to(socketIdOf(room, m.id)).emit('game_state', view);
+    io.to(socketIdOf(room, m.id)).emit('game_state', playerViewFor(room, m.id));
+  }
+  // 观战者:统一的公开视图(房主开了上帝视角才附带身份)
+  if (room.spectators.length) {
+    const specView = roomsMgr.spectatorViewFor(room);
+    for (const s of room.spectators) {
+      io.to(socketIdOf(room, s.id)).emit('game_state', specView);
+    }
   }
   // 广播非隔离的增量事件(笔画/聊天/猜中通知等)给全房间
   for (const ev of extraEvents) {
@@ -65,7 +83,15 @@ function broadcastState(room, extraEvents = []) {
     } else if (ev.type === 'clear') {
       io.to(room.code).emit('clear');
     } else if (ev.type === 'chat') {
-      io.to(room.code).emit('chat', { playerId: ev.playerId, text: ev.text });
+      // channel 未标 → 全房间公开(你画我猜)。
+      // 'alive' → 也是公开发言(存活玩家白天讨论),全房间可见。
+      // 'dead'  → 死人频道:只发给死者 + 观战者,存活玩家看不到(防剧透)。
+      if (ev.channel === 'dead') {
+        deadChannelSockets(room).forEach((sid) =>
+          io.to(sid).emit('chat', { playerId: ev.playerId, text: ev.text, channel: 'dead' }));
+      } else {
+        io.to(room.code).emit('chat', { playerId: ev.playerId, text: ev.text, channel: ev.channel || 'alive' });
+      }
     } else if (ev.type === 'guessed') {
       io.to(room.code).emit('guessed', { playerId: ev.playerId, points: ev.points });
     } else if (ev.type === 'reveal') {
@@ -89,9 +115,77 @@ function socketsExcept(room, exceptMemberId) {
   if (!map) return [];
   return [...map.entries()].filter(([mid]) => mid !== exceptMemberId).map(([, sid]) => sid);
 }
+
+// 死人频道的收信人:已出局的玩家 + 所有观战者。存活玩家被排除(防剧透)。
+// 用游戏状态的 alive 表判定死活;观战者不在 state.alive 里,单独并入。
+function deadChannelSockets(room) {
+  const map = memberSockets.get(room.code);
+  if (!map || !room.state) return [];
+  const alive = room.state.alive || {};
+  const specIds = new Set(room.spectators.map((s) => s.id));
+  return [...map.entries()]
+    .filter(([mid]) => specIds.has(mid) || alive[mid] === false)
+    .map(([, sid]) => sid);
+}
 function bindSocket(room, memberId, socketId) {
   if (!memberSockets.has(room.code)) memberSockets.set(room.code, new Map());
   memberSockets.get(room.code).set(memberId, socketId);
+}
+
+// 房间内是否一个连接都没有(玩家/出局者/观战者全不在线)。
+// "该不该停表"取决于还有没有人在看 —— 这是传输层才知道的信息,
+// 游戏模块只看得到"还有没有人能行动",两者不等价,不能混用。
+function roomIsEmpty(room) {
+  return (memberSockets.get(room.code)?.size || 0) === 0;
+}
+
+// 停表:清掉每秒 tick,并让游戏模块挂起 deadline(绝对时间戳,否则停表期间照走)
+function pauseRoomClock(room) {
+  roomsMgr.clearTimer(room);
+  if (room.state && room.game.pauseClock) room.game.pauseClock(room.state);
+}
+
+// 恢复:按挂起时的剩余时长重设 deadline,再重启 tick
+function resumeRoomClock(room) {
+  if (!room.state || room.state.phase === 'ended') return;
+  if (room.game.resumeClock) room.game.resumeClock(room.state);
+  ensureTimer(room);
+}
+
+// ── 断线重连宽限 ──
+// 掉线后不立刻把人从房间移除,留一段时间让他重连回原座位;
+// 超时未回才真正离开(此时才释放名额、必要时转移房主)。
+const RECONNECT_GRACE_MS = Number(process.env.RECONNECT_GRACE_MS) || 60 * 1000;
+const dropTimers = new Map(); // `${roomCode}:${memberId}` -> timeout
+
+function cancelDrop(roomCode, memberId) {
+  const key = `${roomCode}:${memberId}`;
+  const t = dropTimers.get(key);
+  if (t) { clearTimeout(t); dropTimers.delete(key); }
+}
+
+function scheduleDrop(roomCode, memberId) {
+  cancelDrop(roomCode, memberId);
+  const key = `${roomCode}:${memberId}`;
+  dropTimers.set(key, setTimeout(() => {
+    dropTimers.delete(key);
+    const room = roomsMgr.getRoom(roomCode);
+    if (!room) return;
+    // 期间已重连则不再移除
+    if (socketIdOf(room, memberId)) return;
+    const events = roomsMgr.leaveRoom(roomCode, memberId) || [];
+    const still = roomsMgr.getRoom(roomCode);
+    if (!still) return;                       // 房间已空 → 已销毁
+    // 宽限期结束仍无人在线(玩家和观战者都没了):对局不可能再继续,销毁房间释放资源。
+    // 还有观战者在看时不能删 —— 否则他们会卡在一个已不存在的房间里。
+    if ((memberSockets.get(roomCode)?.size || 0) === 0 && still.spectators.length === 0) {
+      roomsMgr.clearTimer(still);
+      memberSockets.delete(roomCode);
+      roomsMgr.rooms.delete(roomCode);
+      return;
+    }
+    still.state ? broadcastState(still, events) : broadcastLobby(still);
+  }, RECONNECT_GRACE_MS));
 }
 
 // ── 计时器:每秒 tick 一次,推进选词/作画/揭晓阶段 ──
@@ -115,7 +209,10 @@ io.on('connection', (socket) => {
     const room = roomsMgr.getRoom(socket.data.roomCode);
     if (!room) return;
     if (room.state) {
-      socket.emit('game_state', room.game.serializeStateFor(room.state, user.id));
+      const isSpec = room.spectators.some((s) => s.id === user.id);
+      socket.emit('game_state', isSpec
+        ? roomsMgr.spectatorViewFor(room)
+        : playerViewFor(room, user.id));
     } else {
       socket.emit('lobby', lobbyPayload(room));
     }
@@ -132,14 +229,18 @@ io.on('connection', (socket) => {
   });
 
   socket.on('join_room', ({ roomCode }, cb) => {
-    const { room, error } = roomsMgr.joinRoom(roomCode, user);
+    const { room, error, events: rejoinEvents, spectator } = roomsMgr.joinRoom(roomCode, user);
     if (error) return cb?.({ error });
     socket.join(room.code);
     bindSocket(room, user.id, socket.id);
     socket.data.roomCode = room.code;
-    cb?.({ roomCode: room.code, hostId: room.hostId, playerId: user.id });
-    if (room.state) broadcastState(room);
-    else broadcastLobby(room);
+    cancelDrop(room.code, user.id);   // 重连成功 → 取消待执行的移除
+    cb?.({ roomCode: room.code, hostId: room.hostId, playerId: user.id, spectator: !!spectator });
+    if (room.state) {
+      // 先恢复倒计时再广播,让客户端拿到的是已重设的 deadline
+      resumeRoomClock(room);
+      broadcastState(room, rejoinEvents || []);
+    } else broadcastLobby(room);
   });
 
   // 房主在大厅更新游戏配置
@@ -153,6 +254,16 @@ io.on('connection', (socket) => {
     broadcastLobby(room); // 广播给所有人,同步设置显示
   });
 
+  // 房主切换"观战者上帝视角"(可在大厅或对局中随时改)
+  socket.on('set_spectator_godview', ({ enabled }, cb) => {
+    const room = roomsMgr.getRoom(socket.data.roomCode);
+    if (!room) return cb?.({ error: '不在房间中' });
+    if (user.id !== room.hostId) return cb?.({ error: '只有房主能设置' });
+    room.spectatorGodView = !!enabled;
+    cb?.({ ok: true });
+    if (room.state) broadcastState(room); else broadcastLobby(room);
+  });
+
   // 房主踢人(仅大厅阶段)
   socket.on('kick_player', ({ playerId }, cb) => {
     const room = roomsMgr.getRoom(socket.data.roomCode);
@@ -163,7 +274,8 @@ io.on('connection', (socket) => {
 
     const kickedSid = socketIdOf(room, playerId);
     memberSockets.get(room.code)?.delete(playerId);
-    roomsMgr.leaveRoom(room.code, playerId);
+    cancelDrop(room.code, playerId);
+    roomsMgr.leaveRoom(room.code, playerId);   // 仅大厅阶段,无对局事件
     cb?.({ ok: true });
 
     // 通知被踢者并让其离开 socket 房间
@@ -175,9 +287,24 @@ io.on('connection', (socket) => {
     if (still) broadcastLobby(still);
   });
 
+  // 房主发起"再来一局":对局结束后清回大厅,复用大厅/开始流程
+  socket.on('rematch', (cb) => {
+    const room = roomsMgr.getRoom(socket.data.roomCode);
+    if (!room) return cb?.({ error: '不在房间中' });
+    if (user.id !== room.hostId) return cb?.({ error: '只有房主能再来一局' });
+    if (!room.state || room.state.phase !== 'ended') return cb?.({ error: '本局尚未结束' });
+    roomsMgr.resetToLobby(room);
+    cb?.({ ok: true });
+    broadcastLobby(room);   // 所有人(含转正的观战者)回到大厅
+  });
+
   socket.on('game_action', ({ action }, cb) => {
     const room = roomsMgr.getRoom(socket.data.roomCode);
     if (!room) return cb?.({ error: '不在房间中' });
+    // 观战者只能看:不允许投票/行动/开始等任何动作
+    if (room.spectators.some((s) => s.id === user.id)) {
+      return cb?.({ error: '观战中,无法参与对局' });
+    }
 
     if (action.type === 'start' && !room.state) {
       roomsMgr.startGame(room);
@@ -195,12 +322,39 @@ io.on('connection', (socket) => {
     const code = socket.data.roomCode;
     if (!code) return;
     const room = roomsMgr.getRoom(code);
-    if (room) {
-      memberSockets.get(code)?.delete(user.id);
+    if (!room) return;
+
+    // 只有当前绑定的 socket 才触发离开。重连时新 socket 已抢先绑定,
+    // 此时旧 socket 的 disconnect 不应把人踢掉。
+    if (socketIdOf(room, user.id) !== socket.id) return;
+    memberSockets.get(code)?.delete(user.id);
+
+    // 观战者没有座位要保留,直接摘掉(不走宽限期)
+    if (room.spectators.some((s) => s.id === user.id)) {
       roomsMgr.leaveRoom(code, user.id);
       const still = roomsMgr.getRoom(code);
       if (still) (still.state ? broadcastState(still) : broadcastLobby(still));
+      return;
     }
+
+    // 对局进行中:先标记掉线并给一段重连宽限期,时间内回来可坐回原座位。
+    // 未开局(无 state)则没有要保留的座位,直接离开。
+    if (room.state && room.state.phase !== 'ended') {
+      const events = room.game.removePlayer
+        ? room.game.removePlayer(room.state, user.id) || []
+        : [];
+      broadcastState(room, events);
+      scheduleDrop(room.code, user.id);
+      // 房间内一个连接都没有了(玩家、出局者、观战者全走):停表并挂起倒计时。
+      // 判据必须用连接数,不能用"还有没有人能行动"—— 出局玩家仍连着线在看,
+      // 那种情况下表要继续走,否则对局会永久冻结在一个静止画面上。
+      if (roomIsEmpty(room)) pauseRoomClock(room);
+      return;
+    }
+
+    const events = roomsMgr.leaveRoom(code, user.id) || [];
+    const still = roomsMgr.getRoom(code);
+    if (still) (still.state ? broadcastState(still, events) : broadcastLobby(still));
   });
 });
 
@@ -215,6 +369,8 @@ function lobbyPayload(room) {
     maxPlayers: room.game.maxPlayers,
     config: room.config,
     configSchema: room.game.configSchema || null,
+    spectators: room.spectators,
+    spectatorGodView: room.spectatorGodView,
   };
 }
 function broadcastLobby(room) {

@@ -52,3 +52,134 @@ input {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.3; }
 }
+
+/* 遇害动画的刀光:一道白光沿对角线扫过牌面,扫完即隐。
+   配合 WerewolfGame 的 SlashReveal —— 牌被切成两半后错开滑落。 */
+@keyframes bladeSweep {
+  0%   { transform: translate(-130%, -130%); opacity: 0; }
+  35%  { opacity: 1; }
+  100% { transform: translate(130%, 130%); opacity: 0; }
+}
+.slash-blade {
+  animation: bladeSweep 0.55s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+  mix-blend-mode: screen;
+}
+/* 被切开的瞬间整块抖一下,强化"被砍中"的手感 */
+@keyframes slashShake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-4px); }
+  75% { transform: translateX(4px); }
+}
+.slash-wrap { animation: slashShake 0.25s ease-in-out 0.2s; }
+
+/* 平安夜:刀光劈到一半被盾牌挡下 —— 扫到中间就停住并回弹。
+   和 bladeSweep 的区别只在于它不会扫过去。 */
+@keyframes bladeBlocked {
+  0%   { transform: translate(-130%, -130%); opacity: 0; }
+  40%  { transform: translate(-10%, -10%); opacity: 1; }
+  55%  { transform: translate(0, 0); opacity: 1; }
+  70%  { transform: translate(-25%, -25%); opacity: 0.8; }   /* 被弹开 */
+  100% { transform: translate(-60%, -60%); opacity: 0; }
+}
+.block-blade {
+  animation: bladeBlocked 0.9s cubic-bezier(0.3, 0, 0.4, 1) forwards;
+  mix-blend-mode: screen;
+}
+/* 撞击瞬间迸出的火花 */
+@keyframes sparkBurst {
+  0%   { transform: scale(0); opacity: 0; }
+  45%  { transform: scale(0); opacity: 0; }
+  60%  { transform: scale(6); opacity: 1; }
+  100% { transform: scale(11); opacity: 0; }
+}
+.block-spark { animation: sparkBurst 0.9s ease-out forwards; }
+/* 盾牌被磕了一下 */
+@keyframes shieldBrace {
+  0%, 100% { transform: scale(1); }
+  58% { transform: scale(0.94); }
+  72% { transform: scale(1.03); }
+}
+.block-shield { animation: shieldBrace 0.9s ease-out; }
+
+/* 猎人开枪:枪口闪光从中心炸开,目标牌被击中一震后倒下。
+   只在开完枪(既成事实)时播;瞄准过程没有任何动画,否则等于提前
+   把枪口指向谁告诉全场。 */
+@keyframes gunFlash {
+  0%   { transform: scale(0); opacity: 0; }
+  15%  { transform: scale(7); opacity: 1; }
+  100% { transform: scale(14); opacity: 0; }
+}
+.gun-flash { animation: gunFlash 0.45s ease-out forwards; }
+@keyframes gunHit {
+  0%, 100% { transform: translate(0, 0); }
+  20% { transform: translate(6px, -3px); }
+  45% { transform: translate(-5px, 2px); }
+  70% { transform: translate(3px, -1px); }
+}
+.gun-hit { animation: gunHit 0.4s ease-out; }
+/* 等待猎人选择时的呼吸感(不指向任何人,只表示"在等") */
+.hunter-wait { animation: pulse 1.4s ease-in-out infinite; }
+/* 二次确认时的准星缩放 */
+@keyframes aimLock {
+  0% { transform: scale(1.35); opacity: 0.4; }
+  100% { transform: scale(1); opacity: 1; }
+}
+.hunter-aim { animation: aimLock 0.3s ease-out; }
+
+/* 毒药:绿色从中心慢慢浸染开 */
+@keyframes poisonSeep {
+  0%   { transform: scale(0); opacity: 0; }
+  20%  { opacity: 0.9; }
+  100% { transform: scale(26); opacity: 0; }
+}
+.poison-seep { animation: poisonSeep 1.6s ease-out forwards; }
+
+/* 放逐:票堆从上方砸下 */
+@keyframes votesDrop {
+  0%   { transform: translateY(-90px) rotate(-8deg); opacity: 0; }
+  45%  { transform: translateY(48px) rotate(2deg); opacity: 1; }
+  60%  { transform: translateY(38px) rotate(0deg); }
+  100% { transform: translateY(44px) rotate(0deg); opacity: 0; }
+}
+.exile-votes { animation: votesDrop 1.5s cubic-bezier(0.5, 0, 0.75, 0.3) forwards; }
+
+/* 你画我猜:猜中加分的数字弹跳上浮 */
+@keyframes scorePop {
+  0%   { transform: translateY(0) scale(0.6); opacity: 0; }
+  25%  { transform: translateY(-14px) scale(1.25); opacity: 1; }
+  60%  { transform: translateY(-22px) scale(1); opacity: 1; }
+  100% { transform: translateY(-40px) scale(0.95); opacity: 0; }
+}
+.score-pop {
+  animation: scorePop 1.3s cubic-bezier(0.2, 0.8, 0.3, 1) forwards;
+  position: absolute; right: 0; top: 0;
+  font-weight: 800; color: var(--accent); pointer-events: none;
+  white-space: nowrap;
+}
+
+/* 炸弹猫:抽到炸弹时牌炸开 */
+@keyframes kittenBlast {
+  0%   { transform: scale(0); opacity: 0; }
+  18%  { transform: scale(9); opacity: 1; }
+  100% { transform: scale(18); opacity: 0; }
+}
+.kitten-blast { animation: kittenBlast 0.5s ease-out forwards; }
+@keyframes kittenBoom {
+  0%   { transform: scale(1) rotate(0); }
+  15%  { transform: scale(1.15) rotate(-3deg); }
+  40%  { transform: scale(0.94) rotate(4deg); }
+  100% { transform: scale(0.9) rotate(0); opacity: 0.25; }
+}
+.kitten-boom { animation: kittenBoom 1.3s ease-out forwards; }
+
+/* 系统开启"减弱动态效果"时,不做位移/闪光类动画 —— 对前庭敏感的用户
+   这类效果会引起不适。结果照常显示,只是不animate。 */
+@media (prefers-reduced-motion: reduce) {
+  .slash-blade, .block-blade, .block-spark, .gun-flash,
+  .poison-seep, .exile-votes, .kitten-blast { animation: none; opacity: 0; }
+  .kitten-boom { animation: none; }
+  .slash-wrap, .block-shield, .gun-hit, .hunter-wait, .hunter-aim { animation: none; }
+  .slash-wrap *, .gun-hit { transition: none !important; }
+  /* 加分仍然显示,只是不做位移 */
+  .score-pop { animation: none; opacity: 1; transform: none; }
+}
