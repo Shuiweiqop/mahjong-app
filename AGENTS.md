@@ -37,8 +37,13 @@ via `pg` is the only DB path.
 - **Ask first**: anything with production side effects — editing `render.yaml`, changing CORS
   (`CLIENT_ORIGIN`) or `JWT_SECRET` handling, running `server/schema.sql` against a real database,
   committing, pushing, or force-pushing.
-- **Never** commit a secret. `server/.env` is gitignored and holds real values; `.env.example` is
-  the template. Don't move values between them.
+- **Never** commit a secret. `server/.env` holds real values; `.env.example` is the template.
+  Don't move values between them.
+
+`server/.env` was tracked from the initial commit until it was removed from the index — its real
+`DB_PASSWORD` and `JWT_SECRET` are still reachable in git history on every existing clone and on
+the remote. Removing a file from tracking does not unpublish it. If those values still protect
+anything, rotate them; don't assume the untracking fixed it.
 
 `JWT_SECRET` has no fallback value on purpose. With `DATABASE_URL` set (treated as production)
 the server refuses to start without it; locally it generates a random one per boot. Never
