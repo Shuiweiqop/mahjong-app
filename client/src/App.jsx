@@ -5,20 +5,25 @@ import AuthScreen from './AuthScreen.jsx';
 import Lobby from './Lobby.jsx';
 import GameRoom from './GameRoom.jsx';
 import CalculatorScreen from './CalculatorScreen.jsx';
+import { serverError, useT } from './i18n.jsx';
 
-// 开发用:URL 带 ?guest=名字 时,访客身份直接由该名字派生 —— 不读写共享的
-// localStorage,于是同一浏览器多个标签(?guest=A / ?guest=B / …)就是不同访客,
-// 方便在一台机器、不开无痕的情况下模拟多个玩家。刷新后仍稳定(重连测试也能用)。
-// 仅开发模式生效(import.meta.env.DEV),生产构建里直接返回 null —— 否则任何人
-// 都能凭 URL 冒充一个 dev-* 访客。
+// Development helper: when the URL carries ?guest=<name>, the guest identity is
+// derived from that name directly, without reading or writing the shared
+// localStorage. Several tabs in one browser (?guest=A / ?guest=B / ...) are then
+// distinct guests, which makes it easy to simulate multiple players on one machine
+// without opening incognito windows. It stays stable across a refresh, so it works
+// for reconnect testing too.
+// This only applies in development (import.meta.env.DEV); production builds return
+// null, because otherwise anyone could impersonate a dev-* guest through the URL.
 function getUrlGuest() {
   if (!import.meta.env.DEV) return null;
   const name = new URLSearchParams(window.location.search).get('guest');
   return name ? name.trim() : null;
 }
 
-// 稳定的访客 id(持久化):断线重连/刷新后仍是同一个玩家,能坐回原座位。
-// 带 ?guest= 时改用按名字派生的 id,让每个标签互相独立。
+// A stable, persisted guest id: after a dropped connection or a refresh this is
+// still the same player, so they get their original seat back.
+// With ?guest= the id is derived from the name instead, keeping each tab independent.
 function getGuestId(nameOverride) {
   if (nameOverride) return `dev-${nameOverride}`;
   let id = localStorage.getItem('guestId');
@@ -30,6 +35,7 @@ function getGuestId(nameOverride) {
 }
 
 export default function App() {
+  const t = useT();
   const urlRoom = new URLSearchParams(window.location.search).get('room');
   const urlGuest = getUrlGuest();
 
@@ -37,11 +43,13 @@ export default function App() {
   const savedToken = localStorage.getItem('token');
   const savedParsed = savedUser ? JSON.parse(savedUser) : null;
 
-  // ?guest=名字 优先:直接以该访客身份进入,跳过登录界面,且不受共享 localStorage 影响
+  // ?guest=<name> wins: enter directly as that guest, skipping the sign-in screen and
+  // ignoring the shared localStorage
   const [me, setMe] = useState(urlGuest ? { name: urlGuest, guest: true } : savedParsed);
   const [auth, setAuth] = useState(
     urlGuest ? { guestName: urlGuest, guestId: getGuestId(urlGuest) }
-      // 恢复会话:登录用户用 token;访客用持久化的 guestId + 昵称
+      // Restore the session: a token for signed-in users, the persisted guestId plus
+      // nickname for guests
       : savedToken ? { token: savedToken }
       : savedParsed?.guest ? { guestName: savedParsed.name, guestId: getGuestId() }
       : null
@@ -51,7 +59,7 @@ export default function App() {
   const [room, setRoom] = useState(null);        // { code, playerId }
   const socketRef = useRef(null);
 
-  // me 存在时建立 socket 连接
+  // Open the socket connection once we have a user
   useEffect(() => {
     if (!me || !auth) return;
     connect();
@@ -69,8 +77,9 @@ export default function App() {
 
   const handleLogin = (user, token) => { setMe(user); setAuth({ token }); };
   const handleGuest = (name) => {
-    // 访客身份要跨重连稳定,否则断线重连会变成一个全新玩家、丢失原座位。
-    // guestId 存 localStorage,与 socket.id 解耦。
+    // A guest identity has to survive a reconnect; otherwise dropping and reconnecting
+    // turns into a brand-new player and the original seat is lost.
+    // guestId lives in localStorage, decoupled from socket.id.
     const guest = { name, guest: true };
     localStorage.setItem('user', JSON.stringify(guest));
     setMe(guest); setAuth({ guestName: name, guestId: getGuestId() });
@@ -83,18 +92,19 @@ export default function App() {
 
   const createRoom = (gameId) => {
     socketRef.current?.emit('create_room', { gameId }, (res) => {
-      if (res?.error) return alert(res.error);
+      if (res?.error) return alert(serverError(t, res.error));
       setRoom({ code: res.roomCode, playerId: res.playerId }); setScreen('room');
     });
   };
   const joinRoom = (code) => {
     socketRef.current?.emit('join_room', { roomCode: code }, (res) => {
-      if (res?.error) return alert(res.error);
+      if (res?.error) return alert(serverError(t, res.error));
       setRoom({ code: res.roomCode, playerId: res.playerId }); setScreen('room');
     });
   };
   const leaveRoom = () => {
-    // 断开旧连接(服务端据此把我移出房间)并重连一个干净 socket 回大厅
+    // Close the old connection -- that is how the server knows to remove us from the
+    // room -- then reconnect a clean socket back at the lobby
     socketRef.current?.close();
     connect();
     setScreen('lobby'); setRoom(null);

@@ -1,28 +1,42 @@
 import { ui } from './ui';
+import { useT } from './i18n.jsx';
 
-// 大厅游戏设置面板。
-// - 房主:可修改,改动通过 onChange(config) 上报(emit set_config)
-// - 非房主:只读展示当前设置
-// props: lobby(含 config, configSchema), isHost, onChange
+// Game settings panel in the lobby.
+// - Host: can edit; changes are reported through onChange(config), which emits set_config
+// - Everyone else: a read-only view of the current settings
+// props: lobby (carries config and configSchema), isHost, onChange
 export default function LobbySettings({ lobby, isHost, onChange }) {
+  const t = useT();
   const schema = lobby?.configSchema;
+  // Label and hint for each setting: prefer the translation, and fall back to the text
+  // the server sent when the key is missing. That way a game module can add a config
+  // option before its translation exists without the UI showing a raw key.
+  const schemaText = (key, suffix, fallback) => {
+    const k = `cfg.${key}${suffix}`;
+    const out = t(k);
+    return out === k ? fallback : out;
+  };
   if (!schema) return null;
   const cfg = lobby?.config || {};
 
-  // 通用设置面板:按 configSchema 的 type 渲染,不认识具体游戏。
-  //   type:'toggle'  → 开关
-  //   type:'options' → 一排可选值按钮(阶段时长等)
-  // 游戏模块加新配置项只改 configSchema,这里不用动。
-  // 你画我猜的专属项(词库/自定义词)仍走下方定制布局 —— 用 drawSeconds 区分。
+  // Generic settings panel: renders from the type in configSchema and knows nothing
+  // about any specific game.
+  //   type:'toggle'  -> a switch
+  //   type:'options' -> a row of value buttons (phase durations and the like)
+  // A game module adding a config option only changes configSchema; this stays as is.
+  // Draw & Guess has its own options (word bank / custom words) which still use the
+  // bespoke layout below -- drawSeconds is what tells the two apart.
   const genericKeys = Object.keys(schema)
     .filter((k) => schema[k]?.type === 'toggle' || schema[k]?.type === 'options');
   if (genericKeys.length && !schema.drawSeconds) {
     return (
       <div style={ui.card}>
-        <label style={ui.label}>游戏设置{!isHost && '(房主可改)'}</label>
+        <label style={ui.label}>{t('settings.title')}{!isHost && t('settings.hostOnly')}</label>
         {genericKeys.map((k) => {
           const item = schema[k];
           const val = cfg[k] ?? item.default;
+          const label = schemaText(k, '', item.label || k);
+          const hint = item.hint ? schemaText(k, '.hint', item.hint) : null;
 
           if (item.type === 'toggle') {
             return (
@@ -31,8 +45,8 @@ export default function LobbySettings({ lobby, isHost, onChange }) {
                 <input type="checkbox" checked={!!val} disabled={!isHost} style={{ marginTop: 3 }}
                   onChange={(e) => onChange({ ...cfg, [k]: e.target.checked })} />
                 <span>
-                  <div style={{ fontWeight: 700, fontSize: 14 }}>{item.label || k}</div>
-                  {item.hint && <div style={{ color: 'var(--muted)', fontSize: 12 }}>{item.hint}</div>}
+                  <div style={{ fontWeight: 700, fontSize: 14 }}>{label}</div>
+                  {hint && <div style={{ color: 'var(--muted)', fontSize: 12 }}>{hint}</div>}
                 </span>
               </label>
             );
@@ -40,9 +54,9 @@ export default function LobbySettings({ lobby, isHost, onChange }) {
 
           return (
             <div key={k} style={{ padding: '8px 0' }}>
-              <div style={{ fontWeight: 700, fontSize: 14 }}>{item.label || k}</div>
-              {item.hint && (
-                <div style={{ color: 'var(--muted)', fontSize: 12, marginBottom: 6 }}>{item.hint}</div>
+              <div style={{ fontWeight: 700, fontSize: 14 }}>{label}</div>
+              {hint && (
+                <div style={{ color: 'var(--muted)', fontSize: 12, marginBottom: 6 }}>{hint}</div>
               )}
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 4 }}>
                 {item.options.map((opt) => (
@@ -81,18 +95,18 @@ export default function LobbySettings({ lobby, isHost, onChange }) {
 
   return (
     <div style={ui.card}>
-      <label style={ui.label}>游戏设置{!isHost && '(房主可改)'}</label>
+      <label style={ui.label}>{t('settings.title')}{!isHost && t('settings.hostOnly')}</label>
 
       <div style={{ marginBottom: 14 }}>
-        <div style={{ fontSize: 13, marginBottom: 6 }}>每人画几轮</div>
+        <div style={{ fontSize: 13, marginBottom: 6 }}>{t('settings.roundsPerPlayer')}</div>
         <div style={{ display: 'flex', gap: 8 }}>
           {schema.roundsPerPlayer.options.map((n) =>
-            pill(roundsPerPlayer === n, () => set({ roundsPerPlayer: n }), `${n} 轮`, n))}
+            pill(roundsPerPlayer === n, () => set({ roundsPerPlayer: n }), t('settings.roundsUnit', { n }), n))}
         </div>
       </div>
 
       <div style={{ marginBottom: 14 }}>
-        <div style={{ fontSize: 13, marginBottom: 6 }}>每轮作画时间</div>
+        <div style={{ fontSize: 13, marginBottom: 6 }}>{t('settings.drawTime')}</div>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           {schema.drawSeconds.options.map((s) =>
             pill(drawSeconds === s, () => set({ drawSeconds: s }), `${s}s`, s))}
@@ -101,27 +115,30 @@ export default function LobbySettings({ lobby, isHost, onChange }) {
 
       <div style={{ marginBottom: 14 }}>
         <div style={{ fontSize: 13, marginBottom: 6 }}>
-          词库分类 <span style={{ color: 'var(--muted)', fontSize: 12 }}>(不选=全部)</span>
+          {t('settings.categories')} <span style={{ color: 'var(--muted)', fontSize: 12 }}>{t('settings.categoriesHint')}</span>
         </div>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           {schema.categories.map((c) => {
             const on = categories.includes(c);
+            // The category value is the server's word-bank key, so only the display name is
+            // translated -- the original value is what gets submitted
+            const catLabel = t(`cat.${c}`) === `cat.${c}` ? c : t(`cat.${c}`);
             return pill(on, () => {
               const next = on ? categories.filter((x) => x !== c) : [...categories, c];
               set({ categories: next });
-            }, c, c);
+            }, catLabel, c);
           })}
         </div>
       </div>
 
       <div>
         <div style={{ fontSize: 13, marginBottom: 6 }}>
-          自定义词库 <span style={{ color: 'var(--muted)', fontSize: 12 }}>(每行/逗号一个词;填了则只用这些词)</span>
+          {t('settings.customWords')} <span style={{ color: 'var(--muted)', fontSize: 12 }}>{t('settings.customWordsHint')}</span>
         </div>
         {isHost ? (
           <textarea
             style={{ ...ui.input, minHeight: 70, resize: 'vertical', marginBottom: 0, fontFamily: 'inherit' }}
-            placeholder="例:生日蛋糕, 气球, 蜡烛&#10;(留空则用上面的分类词库)"
+            placeholder={t('settings.customPlaceholder')}
             defaultValue={(cfg.customWords || []).join(', ')}
             onBlur={(e) => {
               const words = e.target.value.split(/[,，\n]/).map((w) => w.trim()).filter(Boolean);
@@ -130,7 +147,9 @@ export default function LobbySettings({ lobby, isHost, onChange }) {
           />
         ) : (
           <p style={{ color: 'var(--muted)', fontSize: 13 }}>
-            {(cfg.customWords || []).length ? `已设 ${cfg.customWords.length} 个自定义词` : '(使用分类词库)'}
+            {(cfg.customWords || []).length
+              ? t('settings.customCount', { n: cfg.customWords.length })
+              : t('settings.usingCategories')}
           </p>
         )}
       </div>

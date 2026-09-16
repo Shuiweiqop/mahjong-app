@@ -1,8 +1,11 @@
 import { useState } from 'react';
 import { API_BASE } from './config';
 import { ui } from './ui';
+import { serverError, useT } from './i18n.jsx';
+import LangToggle from './LangToggle.jsx';
 
 export default function AuthScreen({ onLogin, onGuest }) {
+  const t = useT();
   const [tab, setTab] = useState('login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -21,12 +24,14 @@ export default function AuthScreen({ onLogin, onGuest }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       }).then((r) => r.json());
+      // Store the error code rather than the message: the render below looks it up
+      // again, so switching language updates the message already on screen.
       if (res.error) { setError(res.error); return; }
       localStorage.setItem('token', res.token);
       localStorage.setItem('user', JSON.stringify(res.user));
       onLogin(res.user, res.token);
     } catch {
-      setError('连接失败,请确认后端已启动');
+      setError('client.connectFailed');
     } finally { setLoading(false); }
   };
 
@@ -41,41 +46,42 @@ export default function AuthScreen({ onLogin, onGuest }) {
     <div style={ui.narrow}>
       <div style={ui.header}>
         <h1 style={ui.title}>🎨 Playground</h1>
-        <p style={ui.sub}>多人实时游戏平台</p>
+        <p style={ui.sub}>{t('auth.tagline')}</p>
+        <LangToggle style={{ marginTop: 12 }} />
       </div>
 
       <div style={{ ...ui.card }}>
         <div style={{ display: 'flex', gap: 6, background: 'var(--surface-2)', borderRadius: 10, padding: 4, marginBottom: 18 }}>
-          <button style={tabStyle(tab === 'login')} onClick={() => { setTab('login'); setError(''); }}>登录</button>
-          <button style={tabStyle(tab === 'register')} onClick={() => { setTab('register'); setError(''); }}>注册</button>
+          <button style={tabStyle(tab === 'login')} onClick={() => { setTab('login'); setError(''); }}>{t('auth.login')}</button>
+          <button style={tabStyle(tab === 'register')} onClick={() => { setTab('register'); setError(''); }}>{t('auth.register')}</button>
         </div>
 
         {tab === 'register' && (
           <>
-            <label style={ui.label}>昵称</label>
-            <input style={ui.input} value={name} onChange={(e) => setName(e.target.value)} placeholder="你的名字" />
+            <label style={ui.label}>{t('auth.nickname')}</label>
+            <input style={ui.input} value={name} onChange={(e) => setName(e.target.value)} placeholder={t('auth.namePlaceholder')} />
           </>
         )}
-        <label style={ui.label}>邮箱</label>
+        <label style={ui.label}>{t('auth.email')}</label>
         <input style={ui.input} type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="email@example.com" />
-        <label style={ui.label}>密码</label>
+        <label style={ui.label}>{t('auth.password')}</label>
         <input style={ui.input} type="password" value={password} onChange={(e) => setPassword(e.target.value)}
           placeholder="••••••••" onKeyDown={(e) => e.key === 'Enter' && submit()} />
 
-        {error && <div style={ui.error}>{error}</div>}
+        {error && <div style={ui.error}>{serverError(t, error)}</div>}
 
         <button style={{ ...ui.btn, width: '100%' }} onClick={submit} disabled={loading}>
-          {loading ? '请稍候…' : tab === 'login' ? '登录' : '注册'}
+          {loading ? t('auth.pleaseWait') : tab === 'login' ? t('auth.login') : t('auth.register')}
         </button>
       </div>
 
       <div style={{ ...ui.card, textAlign: 'center' }}>
-        <label style={ui.label}>或者直接以访客身份进入</label>
+        <label style={ui.label}>{t('auth.guestLabel')}</label>
         <input style={ui.input} value={guestName} onChange={(e) => setGuestName(e.target.value)}
-          placeholder="输入昵称" maxLength={12} onKeyDown={(e) => e.key === 'Enter' && guestName.trim() && onGuest(guestName.trim())} />
+          placeholder={t('auth.guestPlaceholder')} maxLength={12} onKeyDown={(e) => e.key === 'Enter' && guestName.trim() && onGuest(guestName.trim())} />
         <button style={{ ...ui.btnGhost, width: '100%' }} disabled={!guestName.trim()}
           onClick={() => guestName.trim() && onGuest(guestName.trim())}>
-          以访客身份玩
+          {t('auth.playAsGuest')}
         </button>
       </div>
     </div>

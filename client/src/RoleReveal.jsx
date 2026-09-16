@@ -1,28 +1,43 @@
 import { useState, useEffect } from 'react';
 import { ui } from './ui';
+import { useT } from './i18n.jsx';
 
-// 发身份序幕:洗牌 → 一张牌飞到面前 → 点击翻开露出角色 → 进入游戏。
-// props: role('wolf'|'seer'|'villager'), onDone(), ready(本人已就绪), readyCount/readyTotal(就绪进度)
-// 点"进入游戏"后 onDone() 通知服务端就绪;等所有人就绪后由父组件切走本序幕。
-// 牌面用图片 client/public/games/cards/card-<role>.png,加载失败回退 emoji+文字。
+// Role-reveal intro: shuffle -> a card flies to the front -> tap to flip it and see
+// the role -> enter the game.
+// props: role('wolf'|'seer'|'villager'), onDone(), ready (this player is ready),
+//        readyCount/readyTotal (how many others are ready)
+// Tapping "enter game" calls onDone(), which tells the server this player is ready;
+// once everyone is, the parent switches away from this intro.
+// The card face is an image at client/public/games/cards/card-<role>.png, falling back
+// to emoji plus text if it fails to load.
+// Role colour and emoji are language-independent; the name and description come from
+// the string table (role.<id> / role.<id>.desc).
 const ROLE_META = {
-  wolf: { emoji: '🐺', name: '狼人', color: '#c0392b', desc: '夜晚与同伴猎杀一名玩家' },
-  seer: { emoji: '🔮', name: '预言家', color: '#8b5cf6', desc: '每晚查验一名玩家的身份' },
-  villager: { emoji: '👤', name: '平民', color: '#3ecf8e', desc: '白天找出并投票放逐狼人' },
+  wolf: { emoji: '🐺', color: '#c0392b' },
+  seer: { emoji: '🔮', color: '#8b5cf6' },
+  witch: { emoji: '🧪', color: '#8b5cf6' },
+  hunter: { emoji: '🔫', color: '#c0392b' },
+  villager: { emoji: '👤', color: '#3ecf8e' },
 };
 
 const CARD_W = 200;
 const CARD_H = 300;
 
 export default function RoleReveal({ role, onDone, ready = false, readyCount, readyTotal }) {
-  const meta = ROLE_META[role] || ROLE_META.villager;
-  // 阶段: shuffle(洗牌) → deal(飞牌就位) → flipped(已翻开)
+  const t = useT();
+  const key = ROLE_META[role] ? role : 'villager';
+  const meta = {
+    ...ROLE_META[key],
+    name: t(`role.${key}`),
+    desc: t(`role.${key}.desc`),
+  };
+  // Stages: shuffle -> deal (the card flies into place) -> flipped
   const [stage, setStage] = useState('shuffle');
   const [backImgOk, setBackImgOk] = useState(true);
   const [faceImgOk, setFaceImgOk] = useState(true);
 
   useEffect(() => {
-    const t1 = setTimeout(() => setStage('deal'), 1100);      // 洗牌 1.1s 后发牌
+    const t1 = setTimeout(() => setStage('deal'), 1100);      // deal 1.1s after the shuffle starts
     return () => clearTimeout(t1);
   }, []);
 
@@ -35,7 +50,7 @@ export default function RoleReveal({ role, onDone, ready = false, readyCount, re
       <style>{keyframes}</style>
 
       {stage === 'shuffle' ? (
-        // ── 洗牌:一叠牌背轻微错位抖动 ──
+        // ── Shuffling: a stack of card backs jitters slightly out of alignment ──
         <div style={{ position: 'relative', width: CARD_W, height: CARD_H }}>
           {[0, 1, 2, 3, 4].map((i) => (
             <div key={i} style={{
@@ -47,10 +62,10 @@ export default function RoleReveal({ role, onDone, ready = false, readyCount, re
                 : <div style={backFallback}>🌙</div>}
             </div>
           ))}
-          <p style={hint}>洗牌中…</p>
+          <p style={hint}>{t('reveal.shuffling')}</p>
         </div>
       ) : (
-        // ── 发牌就位 + 可翻转 ──
+        // ── Card dealt into place, now flippable ──
         <div style={{ textAlign: 'center' }}>
           <div style={{ perspective: 1000, width: CARD_W, height: CARD_H, margin: '0 auto',
             animation: stage === 'deal' ? 'dealIn 0.6s cubic-bezier(0.2,0.8,0.2,1)' : 'none' }}>
@@ -59,13 +74,13 @@ export default function RoleReveal({ role, onDone, ready = false, readyCount, re
               transformStyle: 'preserve-3d', transition: 'transform 0.6s',
               transform: flipped ? 'rotateY(180deg)' : 'rotateY(0deg)',
             }}>
-              {/* 背面 */}
+              {/* Back of the card */}
               <div style={{ ...cardBackStyle(backImgOk), position: 'absolute', inset: 0, backfaceVisibility: 'hidden' }}>
                 {backImgOk
                   ? <img src="/games/cards/card-back.png" alt="" style={imgStyle} onError={() => setBackImgOk(false)} />
                   : <div style={backFallback}>🌙</div>}
               </div>
-              {/* 正面(角色) */}
+              {/* Front of the card (the role) */}
               <div style={{
                 position: 'absolute', inset: 0, backfaceVisibility: 'hidden', transform: 'rotateY(180deg)',
                 borderRadius: 16, overflow: 'hidden', border: `2px solid ${meta.color}`,
@@ -85,20 +100,20 @@ export default function RoleReveal({ role, onDone, ready = false, readyCount, re
           </div>
 
           {!flipped ? (
-            <p style={hint}>👆 点击翻开你的身份</p>
+            <p style={hint}>{t('reveal.tapToFlip')}</p>
           ) : (
             <div style={{ marginTop: 20, animation: 'fadeUp 0.4s' }}>
               <div style={{ fontSize: 20, fontWeight: 800, color: meta.color, marginBottom: 4 }}>
-                你是 {meta.emoji} {meta.name}
+                {t('reveal.youAre', { emoji: meta.emoji, role: meta.name })}
               </div>
               <div style={{ color: 'var(--muted)', fontSize: 14, marginBottom: 18 }}>{meta.desc}</div>
               {ready ? (
                 <p style={{ color: 'var(--muted)', fontSize: 14 }}>
-                  ✓ 已准备,等待其他玩家…
+                  {t('reveal.ready')}
                   {readyTotal ? ` (${readyCount}/${readyTotal})` : ''}
                 </p>
               ) : (
-                <button style={ui.btnAccent} onClick={onDone}>进入游戏</button>
+                <button style={ui.btnAccent} onClick={onDone}>{t('reveal.enterGame')}</button>
               )}
             </div>
           )}

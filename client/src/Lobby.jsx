@@ -1,10 +1,13 @@
 import { useEffect, useState } from 'react';
 import { API_BASE } from './config';
 import { ui } from './ui';
+import { gameName, useT } from './i18n.jsx';
+import LangToggle from './LangToggle.jsx';
 
-// 大厅:选游戏 → 创建房间,或用房间码加入。
+// Lobby: pick a game and create a room, or join one with a room code.
 // props: me, connected, onCreate(gameId), onJoin(code), initialRoom, onLogout, onCalc
 export default function Lobby({ me, connected, onCreate, onJoin, initialRoom, onLogout, onCalc }) {
+  const t = useT();
   const [games, setGames] = useState([]);
   const [code, setCode] = useState(initialRoom || '');
 
@@ -12,54 +15,58 @@ export default function Lobby({ me, connected, onCreate, onJoin, initialRoom, on
     fetch(`${API_BASE}/api/games`).then((r) => r.json()).then(setGames).catch(() => {});
   }, []);
 
-  // 若 URL 带 ?room=,自动聚焦加入
+  // If the URL carries ?room=, prefill it so the user can join straight away
   useEffect(() => { if (initialRoom) setCode(initialRoom); }, [initialRoom]);
 
   return (
     <div style={ui.narrow}>
-      <div style={{ display: 'flex', alignItems: 'center', marginBottom: 20 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 20 }}>
         <div>
           <div style={{ fontWeight: 800, fontSize: 18, color: 'var(--primary-light)' }}>🎨 Playground</div>
           <div style={{ fontSize: 12, color: 'var(--muted)' }}>
-            {me.name} {connected ? '· 已连接' : '· 连接中…'}
+            {me.name} {connected ? t('lobby.connected') : t('lobby.connecting')}
           </div>
         </div>
-        <button style={{ ...ui.btnGhost, marginLeft: 'auto' }} onClick={onLogout}>登出</button>
+        <LangToggle style={{ marginLeft: 'auto' }} />
+        <button style={ui.btnGhost} onClick={onLogout}>{t('lobby.logout')}</button>
       </div>
 
-      <label style={ui.label}>选择游戏</label>
-      {games.length === 0 && <p style={{ color: 'var(--muted)', fontSize: 13 }}>加载中…(确认后端已启动)</p>}
+      <label style={ui.label}>{t('lobby.chooseGame')}</label>
+      {games.length === 0 && <p style={{ color: 'var(--muted)', fontSize: 13 }}>{t('lobby.loadingGames')}</p>}
       {games.map((g) => (
         <div key={g.id} style={{ ...ui.card, padding: 0, overflow: 'hidden' }}>
-          {/* 游戏封面图(client/public/games/<id>.png);加载失败则隐藏,不影响卡片 */}
-          <img src={`/games/${g.id}.png`} alt={g.displayName}
+          {/* Cover art (client/public/games/<id>.png); hidden if it fails to load, which leaves the card intact */}
+          <img src={`/games/${g.id}.png`} alt={gameName(t, g.id, g.displayName)}
             style={{ width: '100%', aspectRatio: '16 / 9', objectFit: 'cover', objectPosition: 'center', display: 'block' }}
             onError={(e) => { e.currentTarget.style.display = 'none'; }} />
           <div style={{ display: 'flex', alignItems: 'center', padding: 14 }}>
             <div>
-              <div style={{ fontWeight: 800, fontSize: 16 }}>{g.displayName}</div>
-              <div style={{ fontSize: 12, color: 'var(--muted)' }}>{g.minPlayers}-{g.maxPlayers} 人 · 实时多人</div>
+              <div style={{ fontWeight: 800, fontSize: 16 }}>{gameName(t, g.id, g.displayName)}</div>
+              <div style={{ fontSize: 12, color: 'var(--muted)' }}>
+                {t('lobby.playerRange', { min: g.minPlayers, max: g.maxPlayers })}
+              </div>
             </div>
             <button style={{ ...ui.btnAccent, marginLeft: 'auto' }} disabled={!connected}
-              onClick={() => onCreate(g.id)}>创建房间</button>
+              onClick={() => onCreate(g.id)}>{t('lobby.createRoom')}</button>
           </div>
         </div>
       ))}
 
       <div style={ui.card}>
-        <label style={ui.label}>用房间码加入</label>
+        <label style={ui.label}>{t('lobby.joinByCode')}</label>
         <div style={{ display: 'flex', gap: 8 }}>
           <input style={{ ...ui.input, marginBottom: 0, letterSpacing: 4, textTransform: 'uppercase' }}
             value={code} maxLength={6} placeholder="ABC123"
             onChange={(e) => setCode(e.target.value.toUpperCase())}
             onKeyDown={(e) => e.key === 'Enter' && code.length >= 4 && onJoin(code)} />
-          <button style={ui.btn} disabled={!connected || code.length < 4} onClick={() => onJoin(code)}>加入</button>
+          <button style={ui.btn} disabled={!connected || code.length < 4} onClick={() => onJoin(code)}>{t('lobby.join')}</button>
         </div>
       </div>
 
-      {/* 低调的工具入口:右下角悬浮小麻将图标(算法演示,非游戏门面) */}
+      {/* Understated entry point for the tool: a small floating mahjong icon in the
+          bottom-right corner. It is an algorithm demo, not a headline game. */}
       {onCalc && (
-        <button onClick={onCalc} title="麻将番型计算器 (算法工具)"
+        <button onClick={onCalc} title={t('lobby.calcTitle')}
           style={{
             position: 'fixed', right: 20, bottom: 20, width: 48, height: 48,
             borderRadius: '50%', border: '1px solid var(--border)',

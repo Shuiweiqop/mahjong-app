@@ -1,23 +1,25 @@
 import { useState, useCallback } from 'react';
 import { parseHand, analyzeHand, calcHK, calcGB, calcTenpai } from './calculator/index.js';
+import { useLang, useT, yakuText } from './i18n.jsx';
+import LangToggle from './LangToggle.jsx';
 
 // ── Tile helpers ─────────────────────────────────────────
+// The suit keys and tile counts are fixed; display names come from the message table (Chinese suit characters, English Characters/Dots/...)
 const SUITS_CONFIG = [
-  { key: 'm', label: '万', nums: [1,2,3,4,5,6,7,8,9] },
-  { key: 'p', label: '饼', nums: [1,2,3,4,5,6,7,8,9] },
-  { key: 's', label: '条', nums: [1,2,3,4,5,6,7,8,9] },
-  { key: 'z', label: '字', nums: [1,2,3,4,5,6,7] },
+  { key: 'm', nums: [1,2,3,4,5,6,7,8,9] },
+  { key: 'p', nums: [1,2,3,4,5,6,7,8,9] },
+  { key: 's', nums: [1,2,3,4,5,6,7,8,9] },
+  { key: 'z', nums: [1,2,3,4,5,6,7] },
 ];
 
-const WIND_LABELS   = ['','东','南','西','北'];
-const DRAGON_LABELS = ['','','','','','中','发','白'];
-
-function tileDisplay(suit, num) {
-  if (suit === 'z') return num <= 4 ? WIND_LABELS[num] : DRAGON_LABELS[num];
-  return String(num);
+// The character on the tile face: winds are 1-4, dragons 5-7. Chinese uses the wind and dragon characters;
+// English uses single-letter abbreviations (E/S/W/N/R/G/Wh) because the tile face is too narrow for full names.
+function tileDisplay(t, suit, num) {
+  if (suit !== 'z') return String(num);
+  return num <= 4 ? t(`calc.wind.${num}`) : t(`calc.dragon.${num}`);
 }
-function tileSuitSuffix(suit) {
-  return { m: '万', p: '饼', s: '条', z: '' }[suit];
+function tileSuitSuffix(t, suit) {
+  return suit === 'z' ? '' : t(`calc.suffix.${suit}`);
 }
 function suitColor(suit) {
   return { m: '#e8b84b', p: '#e85454', s: '#4bce7a', z: '#a78bfa' }[suit];
@@ -123,7 +125,7 @@ handArea: {
     padding: '10px 12px', border: '1px solid var(--red)', background: '#1a0000',
   },
 
-  // 听牌
+  // Waits
   tenpaiBox: {
     border: '1px solid var(--gold)', background: '#1a1200',
     padding: 16, marginBottom: 12,
@@ -141,7 +143,7 @@ handArea: {
   }),
   tenpaiNone: { fontSize: 12, color: 'var(--muted)' },
 
-  // 结果
+  // Result
   resultBox: (win) => ({
     border: `1px solid ${win ? 'var(--gold)' : '#c0392b'}`,
     background: win ? '#1a1200' : '#1a0000', padding: 16,
@@ -166,17 +168,17 @@ handArea: {
 };
 
 // ── Tile Picker ──────────────────────────────────────────
-function TilePicker({ hand, onAdd }) {
+function TilePicker({ hand, onAdd, t }) {
   const used = {};
-  for (const t of hand) {
-    const k = `${t.suit}${t.num}`;
+  for (const tile of hand) {
+    const k = `${tile.suit}${tile.num}`;
     used[k] = (used[k] || 0) + 1;
   }
   return (
     <div>
       {SUITS_CONFIG.map(suit => (
         <div key={suit.key} style={C.pickerSection}>
-          <span style={C.pickerLabel}>{suit.label}</span>
+          <span style={C.pickerLabel}>{t(`calc.suit.${suit.key}`)}</span>
           <div style={C.pickerGrid}>
             {suit.nums.map(num => {
               const k   = `${suit.key}${num}`;
@@ -187,8 +189,8 @@ function TilePicker({ hand, onAdd }) {
                   style={C.pickerTile(suit.key, disabled)}
                   onClick={() => !disabled && onAdd({ suit: suit.key, num })}
                 >
-                  <span style={C.pickerTileNum(suit.key)}>{tileDisplay(suit.key, num)}</span>
-                  <span style={C.pickerTileSuit(suit.key)}>{tileSuitSuffix(suit.key)}</span>
+                  <span style={C.pickerTileNum(suit.key)}>{tileDisplay(t, suit.key, num)}</span>
+                  <span style={C.pickerTileSuit(suit.key)}>{tileSuitSuffix(t, suit.key)}</span>
                   {cnt > 0 && <span style={C.dot}>{'●'.repeat(cnt)}</span>}
                 </div>
               );
@@ -201,18 +203,18 @@ function TilePicker({ hand, onAdd }) {
 }
 
 // ── Tenpai display ───────────────────────────────────────
-function TenpaiBox({ tiles }) {
+function TenpaiBox({ tiles, t }) {
   return (
     <div style={C.tenpaiBox}>
-      <div style={C.tenpaiTitle}>🀄 听牌 — 还差一张</div>
+      <div style={C.tenpaiTitle}>{t('calc.tenpaiTitle')}</div>
       {tiles.length === 0 ? (
-        <div style={C.tenpaiNone}>未听牌，继续摸牌</div>
+        <div style={C.tenpaiNone}>{t('calc.notTenpai')}</div>
       ) : (
         <div style={C.tenpaiGrid}>
-          {tiles.map((t, i) => (
-            <div key={i} style={C.tenpaiTile(t.suit)}>
-              <span style={C.handTileNum(t.suit)}>{tileDisplay(t.suit, t.num)}</span>
-              <span style={C.handTileSuit(t.suit)}>{tileSuitSuffix(t.suit)}</span>
+          {tiles.map((tile, i) => (
+            <div key={i} style={C.tenpaiTile(tile.suit)}>
+              <span style={C.handTileNum(tile.suit)}>{tileDisplay(t, tile.suit, tile.num)}</span>
+              <span style={C.handTileSuit(tile.suit)}>{tileSuitSuffix(t, tile.suit)}</span>
             </div>
           ))}
         </div>
@@ -221,8 +223,22 @@ function TenpaiBox({ tiles }) {
   );
 }
 
+// Example line: replaces the {hand} placeholder in the message with a gold-highlighted hand string.
+// Not interpolated then split -- the raw message is split on the placeholder, so the message table still
+// decides the word order (English can put "14 tiles, fan count" after the hand) and the highlighting survives.
+function Example({ text, hand }) {
+  const [before, after = ''] = text.split('{hand}');
+  return (
+    <>
+      {before}<span style={{ color: 'var(--gold)' }}>{hand}</span>{after}
+    </>
+  );
+}
+
 // ── Main ─────────────────────────────────────────────────
 export default function CalculatorScreen({ onBack }) {
+  const t = useT();
+  const { lang } = useLang();
   const [mode, setMode]           = useState('pick');
   const [rule, setRule]           = useState('hk');
   const [hand, setHand]           = useState([]);
@@ -259,7 +275,7 @@ export default function CalculatorScreen({ onBack }) {
     let tiles;
     if (mode === 'pick') {
       if (hand.length !== 13 && hand.length !== 14) {
-        setError(`需要 13 或 14 张牌，当前 ${hand.length} 张`);
+        setError({ key: 'calc.needTiles', vars: { n: hand.length } });
         return;
       }
       tiles = hand;
@@ -269,7 +285,7 @@ export default function CalculatorScreen({ onBack }) {
       tiles = parsed.tiles;
     }
 
-    // ── 13张：听牌提示 ───────────────────────────────────
+    // ── 13 tiles: show the waits ─────────────────────────
     if (tiles.length === 13) {
       setLoading(true);
       setTimeout(() => {
@@ -280,15 +296,15 @@ export default function CalculatorScreen({ onBack }) {
       return;
     }
 
-    // ── 14张：番型计算 ───────────────────────────────────
+    // ── 14 tiles: score the fan ──────────────────────────
     const { win, decompositions } = analyzeHand(tiles);
-    if (!win) { setResult({ win: false, msg: '未和牌 — 请检查手牌' }); return; }
+    if (!win) { setResult({ win: false, msgKey: 'calc.noWin' }); return; }
 
     const calc = rule === 'hk' ? calcHK : calcGB;
     const { fan, yaku, belowMinimum } = calc(decompositions, context);
 
     if (rule === 'gb' && (belowMinimum || fan === 0)) {
-      setResult({ win: false, msg: '和牌但未达 8 番起和（国标规则）' });
+      setResult({ win: false, msgKey: 'calc.belowMinimum' });
       return;
     }
     setResult({ win: true, fan, yaku });
@@ -296,43 +312,49 @@ export default function CalculatorScreen({ onBack }) {
 
   const buttonLabel = () => {
     const count = displayHand.length;
-    if (count === 13) return '检查听牌';
-    if (count === 14) return '计算番数';
-    return `计算 / 听牌`;
+    if (count === 13) return t('calc.checkTenpai');
+    if (count === 14) return t('calc.countFan');
+    return t('calc.calcOrTenpai');
   };
 
+  // Errors are stored as { key, vars } and only looked up at render time -- so an error already on screen follows a language switch
+  const errText = (e) => (e ? t(e.key, e.vars) : '');
+
   return (
-    // 自带 scoped 配色变量(番型计算器的经典金/红主题),不依赖也不污染平台主题
+    // Carries its own scoped color variables (the fan calculator's classic gold/red theme); it neither depends on nor pollutes the platform theme
     <div style={{
       '--gold': '#d4a017', '--gold-light': '#f0c040', '--red': '#c0392b',
       '--surface': '#1c1200', '--border': '#3a2800', '--text': '#f5e6c8',
       '--muted': '#7a6a50', minHeight: '100vh', background: '#0f0a00',
     }}>
     <div style={C.wrap}>
-      {onBack && <button style={C.backBtn} onClick={onBack}>← 返回</button>}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 20 }}>
+        {onBack && <button style={{ ...C.backBtn, marginBottom: 0 }} onClick={onBack}>{t('common.back')}</button>}
+        <LangToggle style={{ marginLeft: 'auto' }} />
+      </div>
 
-      <h2 style={C.title}>番型计算器</h2>
-      <p style={C.sub}>FAN CALCULATOR · TENPAI CHECK</p>
+      <h2 style={C.title}>{t('calc.title')}</h2>
+      <p style={C.sub}>{t('calc.sub')}</p>
 
       {/* Rule selector */}
-      <div style={C.ruleLabel}>规则</div>
+      <div style={C.ruleLabel}>{t('calc.rule')}</div>
       <div style={C.tabs}>
         <button style={C.tab(rule === 'hk')} onClick={() => { setRule('hk'); setResult(null); setTenpai(null); }}>
-          🇭🇰 香港
+          {t('calc.ruleHK')}
         </button>
         <button style={C.tab(rule === 'gb')} onClick={() => { setRule('gb'); setResult(null); setTenpai(null); }}>
-          🇨🇳 国标
+          {t('calc.ruleGB')}
         </button>
       </div>
 
       {/* Input mode */}
-      <div style={C.ruleLabel}>输入方式</div>
+      <div style={C.ruleLabel}>{t('calc.inputMode')}</div>
       <div style={C.tabs}>
         <button style={C.tab(mode === 'pick')} onClick={() => { setMode('pick'); setResult(null); setTenpai(null); }}>
-          点击选牌
+          {t('calc.modePick')}
         </button>
         <button style={C.tab(mode === 'text')} onClick={() => { setMode('text'); setResult(null); setTenpai(null); }}>
-          文字输入
+          {t('calc.modeText')}
         </button>
       </div>
 
@@ -342,16 +364,16 @@ export default function CalculatorScreen({ onBack }) {
   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, alignItems: 'center' }}>
     {displayHand.length === 0 ? (
       <span style={C.handEmpty}>
-        {mode === 'pick' ? '13张=听牌检查，14张=计算番数' : '输入牌型预览'}
+        {mode === 'pick' ? t('calc.handEmptyPick') : t('calc.handEmptyText')}
       </span>
     ) : (
-      displayHand.map((t, i) => (
-        <div key={i} style={C.handTile(t.suit)}
+      displayHand.map((tile, i) => (
+        <div key={i} style={C.handTile(tile.suit)}
           onClick={mode === 'pick' ? () => removeFromHand(i) : undefined}
-          title={mode === 'pick' ? '点击移除' : ''}
+          title={mode === 'pick' ? t('calc.tapToRemove') : ''}
         >
-          <span style={C.handTileNum(t.suit)}>{tileDisplay(t.suit, t.num)}</span>
-          <span style={C.handTileSuit(t.suit)}>{tileSuitSuffix(t.suit)}</span>
+          <span style={C.handTileNum(tile.suit)}>{tileDisplay(t, tile.suit, tile.num)}</span>
+          <span style={C.handTileSuit(tile.suit)}>{tileSuitSuffix(t, tile.suit)}</span>
         </div>
       ))
     )}
@@ -360,63 +382,69 @@ export default function CalculatorScreen({ onBack }) {
 
       {/* Input */}
       {mode === 'pick' ? (
-        <TilePicker hand={hand} onAdd={t => { setHand(h => [...h, t]); setResult(null); setTenpai(null); }} />
+        <TilePicker hand={hand} t={t}
+          onAdd={tile => { setHand(h => [...h, tile]); setResult(null); setTenpai(null); }} />
       ) : (
         <>
           <input style={C.textInput} value={textInput}
             onChange={e => { setTextInput(e.target.value); setResult(null); setTenpai(null); }}
-            placeholder="13张听牌 / 14张算番，例：123m456p789s东东东中"
+            placeholder={t('calc.textPlaceholder')}
           />
           <div style={C.hint}>
-            格式：数字 + 花色（m万 p饼 s条 z字）<br />
-            字牌：1东 2南 3西 4北 5中 6发 7白<br />
-            例：<span style={{ color: 'var(--gold)' }}>123m456p789s1155z</span>（14张算番）<br />
-            例：<span style={{ color: 'var(--gold)' }}>123m456p789s155z</span>（13张听牌）
+            {t('calc.formatLine')}<br />
+            {t('calc.honourLine')}<br />
+            {/* Passing no vars returns the raw message with the {hand} placeholder intact, which Example splits and highlights */}
+            <Example text={t('calc.example14')} hand="123m456p789s1155z" /><br />
+            <Example text={t('calc.example13')} hand="123m456p789s155z" />
           </div>
         </>
       )}
 
       {/* Context (only relevant for 14-tile calculation) */}
       <div style={{ marginTop: 12 }}>
-        <div style={C.contextLabel}>情境（14张时有效）</div>
+        <div style={C.contextLabel}>{t('calc.context')}</div>
         <div style={C.contextRow}>
-          <button style={C.toggle(context.selfDraw)} onClick={() => toggleCtx('selfDraw')}>自摸</button>
-          <button style={C.toggle(context.hasOpen)}  onClick={() => toggleCtx('hasOpen')}>有副露</button>
+          <button style={C.toggle(context.selfDraw)} onClick={() => toggleCtx('selfDraw')}>{t('calc.selfDraw')}</button>
+          <button style={C.toggle(context.hasOpen)}  onClick={() => toggleCtx('hasOpen')}>{t('calc.hasOpen')}</button>
         </div>
       </div>
 
       {/* Actions */}
       <div style={C.actionRow}>
         <button style={C.calcBtn} onClick={handleCalculate} disabled={loading}>
-          {loading ? '计算中...' : buttonLabel()}
+          {loading ? t('calc.calculating') : buttonLabel()}
         </button>
-        <button style={C.clearBtn} onClick={clearAll}>清空</button>
+        <button style={C.clearBtn} onClick={clearAll}>{t('common.clear')}</button>
       </div>
 
       {/* Error */}
-      {error && <div style={C.errorBox}>{error}</div>}
+      {error && <div style={C.errorBox}>{errText(error)}</div>}
 
       {/* Tenpai result */}
-      {tenpai !== null && <TenpaiBox tiles={tenpai} />}
+      {tenpai !== null && <TenpaiBox tiles={tenpai} t={t} />}
 
       {/* Fan result */}
       {result && (
         <div style={C.resultBox(result.win)}>
           {!result.win ? (
-            <div style={C.resultTitle(false)}>{result.msg}</div>
+            <div style={C.resultTitle(false)}>{t(result.msgKey)}</div>
           ) : (
             <>
-              <div style={C.resultTitle(true)}>和牌！</div>
-              <div style={C.fanBig}>{result.fan}<span style={C.fanUnit}>番</span></div>
-              {result.yaku.map((y, i) => (
-                <div key={i} style={C.yakuRow}>
-                  <div>
-                    <div style={C.yakuName}>{y.name}</div>
-                    <div style={C.yakuDesc}>{y.description}</div>
+              <div style={C.resultTitle(true)}>{t('calc.won')}</div>
+              <div style={C.fanBig}>{result.fan}<span style={C.fanUnit}>{t('calc.fanUnit')}</span></div>
+              {result.yaku.map((y, i) => {
+                // The scoring engine emits Chinese pattern names; the English UI swaps in the English name here (see yakuText in i18n)
+                const shown = yakuText(lang, y);
+                return (
+                  <div key={i} style={C.yakuRow}>
+                    <div>
+                      <div style={C.yakuName}>{shown.name}</div>
+                      <div style={C.yakuDesc}>{shown.description}</div>
+                    </div>
+                    <div style={C.yakuFan}>+{shown.fan}</div>
                   </div>
-                  <div style={C.yakuFan}>+{y.fan}</div>
-                </div>
-              ))}
+                );
+              })}
             </>
           )}
         </div>
