@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint .",
-    "test": "node --test src/**/*.test.js",
+    "test": "node --test src/**/*.test.js && node ../scripts/check-i18n.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
