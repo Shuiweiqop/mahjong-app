@@ -74,13 +74,14 @@ export default function KittensGame({ state, act, me }) {
     return (
       <div>
         <div style={{ ...ui.card, textAlign: 'center' }}>
-          <h2 style={{ marginBottom: 8 }}>{t('kittens.winner', { name: ranking[0]?.name })}</h2>
+          <h2 style={{ marginBottom: 8 }}>{t('kittens.winner', { name: ranking[0]?.name || t('common.player') })}</h2>
         </div>
         <div style={ui.card}>
           <label style={ui.label}>{t('kittens.ranking')}</label>
           {ranking.map((p, i) => (
             <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0' }}>
-              <span>{i + 1}. {p.name}{p.id === me.id ? t('common.you') : ''}</span>
+              {/* name can be null for a player the server no longer has a record of */}
+              <span>{i + 1}. {p.name || t('common.player')}{p.id === me.id ? t('common.you') : ''}</span>
               <span>{i === 0 ? '🏆' : '💀'}</span>
             </div>
           ))}

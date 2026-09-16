@@ -423,7 +423,7 @@ function applyAction(s, action, playerId) {
       const sameCat = allCats && cards.every((c) => c === cards[0]);
       const needTarget = () => {
         if (!action.target || !s.alive[action.target] || action.target === playerId) {
-          return '请选择一名有效的目标玩家';
+          return 'kittens.needValidTarget';
         }
         return null;
       };
@@ -668,7 +668,7 @@ function serializeStateFor(s, playerId) {
   // Placings become public once the game is over
   if (s.phase === 'ended') {
     view.ranking = s.ranking.map((id) => ({
-      id, name: s.players.find((p) => p.id === id)?.name || '玩家',
+      id, name: s.players.find((p) => p.id === id)?.name || null,
     }));
   }
   return view;
@@ -678,7 +678,7 @@ function isGameOver(s) {
   if (s.phase !== 'ended') return false;
   const ranking = s.ranking.map((id, i) => ({
     id,
-    name: s.players.find((p) => p.id === id)?.name || '玩家',
+    name: s.players.find((p) => p.id === id)?.name || null,
     score: Math.max(0, s.players.length - i),
   }));
   return { over: true, ranking };

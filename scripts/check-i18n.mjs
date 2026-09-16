@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CLIENT_SRC = path.join(ROOT, 'client', 'src');
 const SERVER = path.join(ROOT, 'server');
-const I18N = path.join(CLIENT_SRC, 'i18n.jsx');
+const I18N = path.join(CLIENT_SRC, 'strings.js');
 
 const src = readFileSync(I18N, 'utf8');
 
@@ -24,7 +24,7 @@ const src = readFileSync(I18N, 'utf8');
 const enStart = src.indexOf('  en: {');
 const zhStart = src.indexOf('  zh: {');
 if (enStart < 0 || zhStart < 0) {
-  console.error('could not locate the en/zh tables in i18n.jsx');
+  console.error('could not locate the en/zh tables in strings.js');
   process.exit(1);
 }
 // The zh table is the last member of STRINGS, so it ends at that object's closing
@@ -32,7 +32,7 @@ if (enStart < 0 || zhStart < 0) {
 // whose keys are Chinese yaku names and would look like untranslated entries.
 const stringsEnd = src.indexOf('\n};', zhStart);
 if (stringsEnd < 0) {
-  console.error('could not find the end of the STRINGS object in i18n.jsx');
+  console.error('could not find the end of the STRINGS object in strings.js');
   process.exit(1);
 }
 const keysIn = (block) => new Set([...block.matchAll(/^\s*'([^']+)':/gm)].map((m) => m[1]));
