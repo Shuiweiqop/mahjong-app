@@ -1,8 +1,8 @@
 import { isHonor, isTerminalOrHonor, isGreen } from '../tiles.js';
 
 // ══════════════════════════════════════════════════════════
-// 国标麻将番型计算器
-// 实现主要番型，按番值从高到低
+// Chinese Official (Guobiao) mahjong fan calculator
+// Implements the main scoring patterns, ordered from highest fan value to lowest
 // ══════════════════════════════════════════════════════════
 
 export function calcGB(decompositions, context = {}) {
@@ -10,7 +10,7 @@ export function calcGB(decompositions, context = {}) {
 
   const first = decompositions[0];
 
-  // 特殊牌型
+  // Special hand shapes
   if (first[0]?.type === 'thirteen_orphans') {
     return { fan: 88, yaku: [{ name: '十三幺', fan: 88, description: '13种幺九牌各一张加任意一张重复' }] };
   }
@@ -18,7 +18,7 @@ export function calcGB(decompositions, context = {}) {
     return calcSevenPairsGB(first[0].tiles, context);
   }
 
-  // 标准牌型 — 选分最高的拆法
+  // Standard hand shape -- pick the highest-scoring decomposition
   let best = null;
   for (const decomp of decompositions) {
     const result = calcStandardGB(decomp, context);
@@ -27,12 +27,12 @@ export function calcGB(decompositions, context = {}) {
   return best || { fan: 0, yaku: [] };
 }
 
-// ── 七对子 ───────────────────────────────────────────────
+// ── Seven Pairs ──────────────────────────────────────────
 function calcSevenPairsGB(tiles, context) {
   const yaku = [];
   let fan = 0;
 
-  // 连七对 (88番): 同花色连续七对
+  // Seven Shifted Pairs (88 fan): seven consecutive pairs in the same suit
   const suits = tiles.map(t => t.suit);
   const allSameSuit = new Set(suits).size === 1 && suits[0] !== 'z';
   if (allSameSuit) {
@@ -50,7 +50,7 @@ function calcSevenPairsGB(tiles, context) {
     }
   }
 
-  // 普通七对 (2番)
+  // Ordinary Seven Pairs (2 fan)
   yaku.push({ name: '七对', fan: 2, description: '七个对子' });
   fan = 2;
 
@@ -66,7 +66,7 @@ function calcSevenPairsGB(tiles, context) {
   return { fan, yaku };
 }
 
-// ── 标准牌型 ─────────────────────────────────────────────
+// ── Standard hand shape ──────────────────────────────────
 function calcStandardGB(decomp, context) {
   const pair  = decomp.find(m => m.type === 'pair');
   const melds = decomp.filter(m => m.type !== 'pair');
@@ -79,12 +79,12 @@ function calcStandardGB(decomp, context) {
     fan += f;
   };
 
-  // 提前定义花色变量（全局使用）
+  // Define the suit variables up front (used throughout this function)
   const suits = new Set(allTiles.map(t => t.suit));
   const hasHonor = suits.has('z');
   const numSuits = [...suits].filter(s => s !== 'z').length;
 
-  // ── 88番 ────────────────────────────────────────────────
+  // ── 88 fan ──────────────────────────────────────────────
 
   const windMelds = melds.filter(m => m.tiles[0].suit === 'z' && m.tiles[0].num <= 4);
   if (windMelds.length === 4) {
@@ -109,7 +109,7 @@ function calcStandardGB(decomp, context) {
     return { fan, yaku };
   }
 
-  // ── 64番 ────────────────────────────────────────────────
+  // ── 64 fan ──────────────────────────────────────────────
 
   const windPair = pair && pair.tiles[0].suit === 'z' && pair.tiles[0].num <= 4;
   if (windMelds.length === 3 && windPair) {
@@ -128,18 +128,23 @@ function calcStandardGB(decomp, context) {
     return { fan, yaku };
   }
 
-  // 四暗刻要求"暗"——未副露 *且* 自摸。荣和时最后一组是明刻,只能算对对和。
-  // 另外这里不能像其他番种那样直接 return:清一色(24番)写在下面,提前返回
-  // 会让"清一色四暗刻"这种牌永远少算 24 番。改为记下番种继续往下走。
+  // Four Concealed Triplets requires the triplets to actually be concealed -- no melds
+  // claimed *and* a self-draw. On a discard win the last group is a melded triplet, so the
+  // hand can only score All Triplets.
+  // Also, unlike the other patterns we must not return early here: Full Flush (24 fan) is
+  // scored further down, and returning now would permanently cost a "Full Flush + Four
+  // Concealed Triplets" hand those 24 fan. So we record the pattern and keep going.
   const isFourConcealed = !context.hasOpen && context.selfDraw && melds.every(m => m.type === 'tri');
   if (isFourConcealed) {
     addYaku('四暗刻', 64, '四组暗刻(门清自摸)');
   }
 
-  // ── 48番 ────────────────────────────────────────────────
+  // ── 48 fan ──────────────────────────────────────────────
 
-  // 这几个 48 番的番种都必然是清一色(同花色四组),提前 return 会把下面的
-  // 清一色 24 番吃掉。国标里它们与清一色是可以复合的,所以只记番不返回。
+  // These 48-fan patterns are necessarily Full Flush hands as well (four melds in the same
+  // suit), so returning early would swallow the Full Flush 24 fan scored below. Under
+  // Chinese Official rules they do combine with Full Flush, so we only record the fan and
+  // do not return.
   const siFourSame = checkSameSuitFourIdentical(melds);
   if (siFourSame) {
     addYaku('一色四同顺', 48, '同花色四组完全相同的顺子');
@@ -150,7 +155,7 @@ function calcStandardGB(decomp, context) {
     addYaku('一色四节高', 48, '同花色四组数字依次递增1的刻子');
   }
 
-  // ── 32番 ────────────────────────────────────────────────
+  // ── 32 fan ──────────────────────────────────────────────
 
   const fourStepSeq = checkSameSuitFourStep(melds);
   if (fourStepSeq) {
@@ -163,9 +168,10 @@ function calcStandardGB(decomp, context) {
     return { fan, yaku };
   }
 
-  // ── 24番 ────────────────────────────────────────────────
+  // ── 24 fan ──────────────────────────────────────────────
 
-  // 清一色：移到这里，不加 fan === 0 限制，避免被清龙等番型挡住
+  // Full Flush: moved here and given no fan === 0 guard, so that patterns such as Pure
+  // Straight cannot block it
   if (numSuits === 1 && !hasHonor) {
     addYaku('清一色', 24, '全部同一花色，无字牌');
   }
@@ -195,14 +201,15 @@ function calcStandardGB(decomp, context) {
     return { fan, yaku };
   }
 
-  // ── 16番 ────────────────────────────────────────────────
+  // ── 16 fan ──────────────────────────────────────────────
 
   if (allTiles.every(t => t.suit !== 'z' && (t.num === 1 || t.num === 9))) {
     addYaku('清幺九', 16, '全部由1和9组成，无字牌');
     return { fan, yaku };
   }
 
-  // 三暗刻不能和四暗刻叠加 —— 四组暗刻已经把三组包含在内了(国标"不重复计算"原则)
+  // Three Concealed Triplets must not stack with Four Concealed Triplets -- four concealed
+  // triplets already contain three of them (the Chinese Official "no double counting" principle)
   if (!context.hasOpen && !isFourConcealed) {
     const triCount = melds.filter(m => m.type === 'tri').length;
     if (triCount >= 3) {
@@ -218,7 +225,7 @@ function calcStandardGB(decomp, context) {
   const triSameNum = checkTripletsThreeSuits(melds);
   if (triSameNum) addYaku('三同刻', 16, '三种花色相同数字的刻子');
 
-  // ── 12番 ────────────────────────────────────────────────
+  // ── 12 fan ──────────────────────────────────────────────
 
   if (onlyNonHonor && allNums.every(n => n > 5)) {
     addYaku('大于五', 12, '所有牌数字大于5');
@@ -231,7 +238,7 @@ function calcStandardGB(decomp, context) {
     addYaku('三风刻', 12, '三组风牌刻子');
   }
 
-  // ── 8番 ─────────────────────────────────────────────────
+  // ── 8 fan ───────────────────────────────────────────────
 
   if (numSuits === 1 && hasHonor && fan === 0) {
     addYaku('混一色', 8, '一种花色加字牌');
@@ -248,15 +255,20 @@ function calcStandardGB(decomp, context) {
   const triColorDragon = checkTriColorDragon(melds, pair);
   if (triColorDragon && fan === 0) addYaku('三色双龙会', 16, '三种花色老少副和对子');
 
-  // ── 4番 ─────────────────────────────────────────────────
+  // ── 4 fan ───────────────────────────────────────────────
 
-  // 这一档的 fan === 0 守卫原本是想避免高番牌型重复计小番,但"不求人"讲的是
-  // 和牌方式(门清自摸),而"全带幺/断幺/平和"讲的是牌型 —— 两者不是同一个维度,
-  // 互相挡住是错的。实测 234m567m345p678s55p(标准断幺平和)门清自摸只拿到
-  // 不求人4+自摸1+门前清2 = 7 番,断幺 4 番被"不求人"吃掉,结果 7 < 8 判不能和。
+  // The fan === 0 guard at this tier was originally meant to stop high-scoring hands from
+  // also collecting small patterns, but Fully Concealed Self-Drawn Hand describes *how* the
+  // hand was won (concealed + self-draw), whereas Outside Hand / All Simples / All Sequences
+  // describe the *shape* of the hand -- these are not the same dimension, so letting them
+  // block each other is wrong. Measured: 234m567m345p678s55p (a plain All Simples + All
+  // Sequences hand) won concealed by self-draw only scored Fully Concealed Self-Drawn Hand 4
+  // + Self-Draw 1 + Concealed Hand 2 = 7 fan, because All Simples' 4 fan was swallowed by
+  // Fully Concealed Self-Drawn Hand, and 7 < 8 meant the hand was judged unable to win.
   //
-  // 牌型这三个之间才是互斥的(手牌不可能既全带幺又断幺),用 shapeFan 单独串起来,
-  // 与"不求人"各走各的。
+  // It is only these three shape patterns that are mutually exclusive with each other (a hand
+  // cannot be both an Outside Hand and All Simples), so they are chained through their own
+  // shapeFan variable and run independently of Fully Concealed Self-Drawn Hand.
   const shapeFanBefore = fan;
   const allWithTerminal = decomp.every(m => m.tiles.some(t => isTerminalOrHonor(t)));
   const noTerminal = allTiles.every(t => !isTerminalOrHonor(t));
@@ -271,14 +283,15 @@ function calcStandardGB(decomp, context) {
     addYaku('平和', 2, '四组顺子加非字牌对子');
   }
 
-  // 不求人 = 门清 + 自摸,已经把两者含在内,所以下面的通用加分要跳过它们,
-  // 否则同一件事算三遍(实测会多出 3 番)。
+  // Fully Concealed Self-Drawn Hand = concealed + self-draw, and already covers both, so the
+  // general bonuses below must skip them; otherwise the same fact is counted three times
+  // (measured: 3 fan too many).
   const isSelfDrawConcealed = !context.hasOpen && context.selfDraw;
   if (isSelfDrawConcealed) {
     addYaku('不求人', 4, '门清手牌自摸');
   }
 
-  // ── 通用加分 ─────────────────────────────────────────────
+  // ── General bonuses ──────────────────────────────────────
 
   for (const d of dragonMelds) {
     const names = { 5: '中', 6: '发', 7: '白' };
@@ -298,13 +311,14 @@ function calcStandardGB(decomp, context) {
     if (seatMeld) addYaku('门风刻', 2, '自己门风刻子');
   }
 
-  // 已计"不求人"时不再单独计自摸/门前清 —— 不求人本身就是这两者的合称
+  // Once Fully Concealed Self-Drawn Hand is scored, Self-Draw and Concealed Hand are no longer
+  // scored separately -- Fully Concealed Self-Drawn Hand is precisely the combined name for those two
   if (!isSelfDrawConcealed) {
     if (context.selfDraw) addYaku('自摸', 1, '自摸和牌');
     if (!context.hasOpen) addYaku('门前清', 2, '手牌未副露');
   }
 
-  // 最少 8 番才算和牌（国标规则）
+  // At least 8 fan is required for the hand to win (Chinese Official rule)
   if (fan < 8) {
     return { fan: 0, yaku: [], belowMinimum: true };
   }
@@ -312,7 +326,7 @@ function calcStandardGB(decomp, context) {
   return { fan, yaku };
 }
 
-// ── 辅助判断函数 ─────────────────────────────────────────
+// ── Helper predicates ────────────────────────────────────
 
 function checkNineLanterns(tiles) {
   const suits = new Set(tiles.map(t => t.suit));

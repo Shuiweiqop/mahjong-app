@@ -108,16 +108,28 @@ different diff. If you spot an unrelated bug or a magic value, **propose it — 
 If the real scope turns out much larger than the request (e.g. "add a role" actually means touching
 the phase state machine), stop and say so before proceeding.
 
-The code and comments are largely in Chinese. Match that — don't rewrite Chinese comments into
-English as a drive-by.
+**Write everything in the codebase in English** — comments, identifiers, log messages, commit
+messages. The source was originally commented in Chinese and was converted; don't reintroduce it.
+
+User-facing Chinese belongs in exactly one place: the `zh` table in `client/src/i18n.jsx`. The
+server sends error *codes* (`room.notInRoom`), never prose — see the note at the top of
+`server/server.js`. Adding a user-visible string means adding a key to **both** language tables;
+`node scripts/check-i18n.mjs` fails the build if the two drift apart.
+
+Two deliberate exceptions, both load-bearing data rather than display text:
+- the mahjong scoring engine (`client/src/calculator/rules/*`) emits Chinese yaku names, which are
+  the lookup keys into `YAKU_EN` in `i18n.jsx`;
+- Draw & Guess category keys and its Chinese word bank (`server/games/drawguess/words.js`).
 
 ## Verifying a change
 
 `npm run check` in `server/` (lint + contract tests) and `npm run lint` in `client/`.
 
 - **`server` lint and tests are both clean at baseline.** A new failure is yours.
-- **`client` lint already has 4 pre-existing errors** (`react-hooks/refs` in `DrawCanvas.jsx`,
-  `react-hooks/set-state-in-effect` in `Lobby.jsx`). Don't block on them; don't add more.
+- **`client` lint already has 9 pre-existing errors**: `react-hooks/refs` in `DrawCanvas.jsx`,
+  `react-hooks/set-state-in-effect` in `Lobby.jsx`, and `react-refresh/only-export-components`
+  in `i18n.jsx` (which deliberately exports hooks and helpers next to the Provider).
+  Don't block on them; don't add more.
 
 77 tests across four files: `games/contract.test.js` (module interface + info-hiding),
 `games/werewolf/rules.test.js`, `games/drawguess/rules.test.js`, `routes/auth.test.js`.

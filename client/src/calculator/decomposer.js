@@ -1,5 +1,5 @@
 import { tileEq } from './tiles.js';
-// 从手牌里移除一张牌
+// Remove one tile from the hand
 function removeTile(tiles, t) {
   const idx = tiles.findIndex(x => tileEq(x, t));
   if (idx === -1) return null;
@@ -8,7 +8,7 @@ function removeTile(tiles, t) {
   return next;
 }
 
-// 找所有顺子（连续3张数牌）
+// Find all sequences (3 consecutive number tiles)
 function findSequences(tiles) {
   const seqs = [];
   for (const t of tiles) {
@@ -26,7 +26,7 @@ function findSequences(tiles) {
   return seqs;
 }
 
-// 找所有刻子（3张相同）
+// Find all triplets (3 identical tiles)
 function findTriplets(tiles) {
   const seen = new Set();
   const trips = [];
@@ -42,7 +42,7 @@ function findTriplets(tiles) {
   return trips;
 }
 
-// 找所有对子
+// Find all pairs
 function findPairs(tiles) {
   const seen = new Set();
   const pairs = [];
@@ -58,14 +58,14 @@ function findPairs(tiles) {
   return pairs;
 }
 
-// 递归找所有合法拆法（标准和牌：4组 + 1对）
+// Recursively find every valid decomposition (a standard winning hand: 4 melds + 1 pair)
 function decompose(tiles, melds, pairUsed) {
   if (tiles.length === 0 && pairUsed) return [melds];
   if (tiles.length === 0) return [];
 
   const results = [];
 
-  // 先尝试用对子（如果还没用过）
+  // Try taking the pair first (if one has not been used yet)
   if (!pairUsed && tiles.length >= 2) {
     for (const pair of findPairs(tiles)) {
       const rest = removeTile(removeTile(tiles, pair.tiles[0]), pair.tiles[1]);
@@ -74,7 +74,7 @@ function decompose(tiles, melds, pairUsed) {
     }
   }
 
-  // 尝试顺子
+  // Try sequences
   for (const seq of findSequences(tiles)) {
     const rest = seq.tiles.reduce((acc, t) => removeTile(acc, t), tiles);
     if (rest) {
@@ -83,7 +83,7 @@ function decompose(tiles, melds, pairUsed) {
     }
   }
 
-  // 尝试刻子
+  // Try triplets
   for (const tri of findTriplets(tiles)) {
     const rest = tri.tiles.reduce((acc, t) => removeTile(acc, t), tiles);
     if (rest) {
@@ -95,7 +95,7 @@ function decompose(tiles, melds, pairUsed) {
   return results;
 }
 
-// 检查七对子
+// Check for Seven Pairs
 function checkSevenPairs(tiles) {
   const counts = {};
   for (const t of tiles) {
@@ -109,7 +109,7 @@ function checkSevenPairs(tiles) {
   return null;
 }
 
-// 检查国士无双（13幺）
+// Check for Thirteen Orphans (Thirteen Terminals)
 function checkThirteenOrphans(tiles) {
   const required = [
     {suit:'m',num:1},{suit:'m',num:9},
@@ -129,19 +129,19 @@ function checkThirteenOrphans(tiles) {
   return null;
 }
 
-// 主入口：判断是否和牌，返回所有拆法
+// Main entry point: decide whether the hand wins, and return every decomposition
 export function analyzeHand(tiles) {
   if (tiles.length !== 14) return { win: false, decompositions: [] };
 
-  // 七对子
+  // Seven Pairs
   const sevenPairs = checkSevenPairs(tiles);
   if (sevenPairs) return { win: true, decompositions: [sevenPairs] };
 
-  // 国士无双
+  // Thirteen Orphans
   const thirteen = checkThirteenOrphans(tiles);
   if (thirteen) return { win: true, decompositions: [thirteen] };
 
-  // 标准和牌
+  // Standard winning hand
   const decomps = decompose(tiles, [], false);
   const valid = decomps.filter(d => {
     const pairs = d.filter(m => m.type === 'pair');
@@ -149,7 +149,7 @@ export function analyzeHand(tiles) {
     return pairs.length === 1 && melds.length === 4;
   });
 
-  // 去重
+  // Deduplicate
   const seen = new Set();
   const unique = valid.filter(d => {
     const key = JSON.stringify(d.map(m => m.type + m.tiles.map(t => `${t.suit}${t.num}`).join('')).sort());

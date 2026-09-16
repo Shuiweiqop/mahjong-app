@@ -1,5 +1,5 @@
-// 游戏模块注册表 —— 平台的可扩展接缝。
-// 新增游戏只需实现统一接口并在这里注册,平台其余部分无需改动。
+// Game module registry —— the platform's extension seam.
+// Adding a game only requires implementing the shared interface and registering it here; the rest of the platform needs no changes.
 
 const drawguess = require('./drawguess');
 const werewolf = require('./werewolf');
@@ -15,7 +15,7 @@ function getGame(id) {
   return games[id] || null;
 }
 
-// 供前端大厅展示的游戏清单
+// The list of games for the frontend lobby to display
 function listGames() {
   return Object.values(games).map((g) => ({
     id: g.id,

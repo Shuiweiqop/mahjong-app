@@ -1,13 +1,13 @@
 import { isHonor, isTerminalOrHonor } from '../tiles.js';
 
-// ── 香港麻将番型 ─────────────────────────────────────────
-// 返回: [{ name, fan, description }]
+// ── Hong Kong mahjong scoring patterns ───────────────────
+// Returns: [{ name, fan, description }]
 
 export function calcHK(decompositions, context = {}) {
   // context: { selfDraw, lastTile, seat, prevailing }
   if (!decompositions || decompositions.length === 0) return { fan: 0, yaku: [] };
 
-  // 特殊牌型
+  // Special hand shapes
   const first = decompositions[0];
   if (first[0]?.type === 'seven_pairs') {
     return calcSevenPairs(first[0].tiles, context);
@@ -16,7 +16,7 @@ export function calcHK(decompositions, context = {}) {
     return { fan: 13, yaku: [{ name: '国士无双', fan: 13, description: '13种幺九牌各一张加一对' }] };
   }
 
-  // 标准牌型 — 选分最高的拆法
+  // Standard hand shape -- pick the highest-scoring decomposition
   let best = null;
   for (const decomp of decompositions) {
     const result = calcStandard(decomp, context);
@@ -25,12 +25,12 @@ export function calcHK(decompositions, context = {}) {
   return best || { fan: 0, yaku: [] };
 }
 
-// ── 七对子 ───────────────────────────────────────────────
+// ── Seven Pairs ──────────────────────────────────────────
 function calcSevenPairs(tiles, context) {
   const yaku = [{ name: '七对', fan: 3, description: '七个对子' }];
   let fan = 3;
 
-  // 豪华七对（有4张相同）
+  // Deluxe Seven Pairs (contains 4 identical tiles)
   const counts = {};
   for (const t of tiles) {
     const k = `${t.suit}${t.num}`;
@@ -49,30 +49,30 @@ function calcSevenPairs(tiles, context) {
   return { fan, yaku };
 }
 
-// ── 标准牌型 ─────────────────────────────────────────────
+// ── Standard hand shape ──────────────────────────────────
 function calcStandard(decomp, context) {
   const pair = decomp.find(m => m.type === 'pair');
   const melds = decomp.filter(m => m.type !== 'pair');
   const yaku = [];
   let fan = 0;
 
-  // 基本和牌（必须有）
+  // Base win (always awarded)
   yaku.push({ name: '和牌', fan: 1, description: '基本和牌' });
   fan += 1;
 
-  // 自摸
+  // Self-draw
   if (context.selfDraw) {
     yaku.push({ name: '自摸', fan: 1, description: '自己摸牌和牌' });
     fan += 1;
   }
 
-  // 门清（没有副露）
+  // Fully concealed (no melds claimed from other players)
   if (!context.hasOpen) {
     yaku.push({ name: '门清', fan: 1, description: '手牌全部未副露' });
     fan += 1;
   }
 
-  // 平和（全顺子 + 非役牌对子）
+  // All Sequences (all sequences + a pair that is not a value tile)
   const allSeq = melds.every(m => m.type === 'seq');
   const pairNotHonor = pair && !isHonor(pair.tiles[0]);
   if (allSeq && pairNotHonor) {
@@ -80,14 +80,14 @@ function calcStandard(decomp, context) {
     fan += 1;
   }
 
-  // 全刻（全部刻子）
+  // All Triplets (every meld is a triplet)
   const allTri = melds.every(m => m.type === 'tri');
   if (allTri) {
     yaku.push({ name: '对对和', fan: 3, description: '全部刻子（含碰）' });
     fan += 3;
   }
 
-  // 清一色
+  // Full Flush
   const allSuits = new Set([
     ...melds.flatMap(m => m.tiles.map(t => t.suit)),
     ...pair.tiles.map(t => t.suit)
@@ -98,13 +98,13 @@ function calcStandard(decomp, context) {
     fan += 5;
   }
 
-  // 混一色
+  // Half Flush
   if (allSuits.size === 2 && allSuits.has('z')) {
     yaku.push({ name: '混一色', fan: 3, description: '一种花色加字牌' });
     fan += 3;
   }
 
-  // 幺九刻（含终端或字牌的刻子）
+  // Terminal/honour triplets (triplets made of terminals or honour tiles)
   const terminalMelds = melds.filter(m =>
     m.type === 'tri' && isTerminalOrHonor(m.tiles[0])
   );
@@ -113,17 +113,17 @@ function calcStandard(decomp, context) {
     fan += terminalMelds.length;
   }
 
-  // 字牌对（中发白 or 圈风/门风）
+  // Honour pair (a dragon, or the prevailing/seat wind)
   if (pair && isHonor(pair.tiles[0])) {
     const n = pair.tiles[0].num;
-    if (n >= 5) { // 中(5)发(6)白(7)
+    if (n >= 5) { // Red(5) Green(6) White(7)
       const names = { 5: '中', 6: '发', 7: '白' };
       yaku.push({ name: `役牌：${names[n]}`, fan: 1, description: '三元牌对子' });
       fan += 1;
     }
   }
 
-  // 三元牌（中发白刻子）
+  // Dragon tiles (triplets of Red/Green/White)
   const dragonMelds = melds.filter(m =>
     m.type === 'tri' && m.tiles[0].suit === 'z' && m.tiles[0].num >= 5
   );
@@ -142,7 +142,7 @@ function calcStandard(decomp, context) {
     fan += 8;
   }
 
-  // 四风刻
+  // Wind triplets
   const windMelds = melds.filter(m =>
     m.type === 'tri' && m.tiles[0].suit === 'z' && m.tiles[0].num <= 4
   );

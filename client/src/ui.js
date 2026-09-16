@@ -1,4 +1,5 @@
-// 共享内联样式 —— 中性游戏平台风格,各组件复用,保持一致。
+// Shared inline styles -- a neutral game-platform look, reused across components
+// so everything stays consistent.
 export const ui = {
   wrap: { maxWidth: 900, margin: '0 auto', padding: '20px 16px' },
   narrow: { maxWidth: 420, margin: '0 auto', padding: '40px 16px' },
