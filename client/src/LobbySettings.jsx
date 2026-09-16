@@ -79,6 +79,8 @@ export default function LobbySettings({ lobby, isHost, onChange }) {
 
   const drawSeconds = cfg.drawSeconds ?? schema.drawSeconds.default;
   const roundsPerPlayer = cfg.roundsPerPlayer ?? schema.roundsPerPlayer.default;
+  // Older servers do not send wordLang; fall back so the control simply does not render
+  const wordLang = cfg.wordLang ?? schema.wordLang?.default;
   const categories = cfg.categories || [];
 
   const set = (patch) => onChange({ ...cfg, ...patch });
@@ -96,6 +98,21 @@ export default function LobbySettings({ lobby, isHost, onChange }) {
   return (
     <div style={ui.card}>
       <label style={ui.label}>{t('settings.title')}{!isHost && t('settings.hostOnly')}</label>
+
+      {/* Which word bank the room draws from. This is a room-wide setting, not the
+          viewer's UI language: everyone has to be guessing the same word. */}
+      {schema.wordLang && (
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ fontSize: 13, marginBottom: 6 }}>{t('settings.wordLang')}</div>
+          <div style={{ color: 'var(--muted)', fontSize: 12, marginBottom: 6 }}>
+            {t('settings.wordLangHint')}
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {schema.wordLang.options.map((code) =>
+              pill(wordLang === code, () => set({ wordLang: code }), t(`settings.wordLang.${code}`), code))}
+          </div>
+        </div>
+      )}
 
       <div style={{ marginBottom: 14 }}>
         <div style={{ fontSize: 13, marginBottom: 6 }}>{t('settings.roundsPerPlayer')}</div>

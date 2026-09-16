@@ -15,7 +15,11 @@ const REVEAL_SECONDS = 5;       // Duration of the reveal / intermission
 const PICK_SECONDS = 15;        // How long the drawer has to pick a word
 
 // Defaults and permitted values for the host-configurable settings
-const DEFAULTS = { drawSeconds: 80, roundsPerPlayer: 2, categories: [], customWords: [] };
+const DEFAULTS = { drawSeconds: 80, roundsPerPlayer: 2, categories: [], customWords: [], wordLang: 'zh' };
+// Which word bank a room draws from. This is deliberately a ROOM setting rather than
+// each player's UI language: everyone in a round has to be guessing the same word, so
+// it cannot follow a per-viewer preference.
+const WORD_LANG_OPTIONS = ['zh', 'en'];
 const DRAW_SECONDS_OPTIONS = [45, 60, 80, 120];
 const ROUNDS_OPTIONS = [1, 2, 3];
 
@@ -32,6 +36,14 @@ const MAX_STROKES_PER_MSG = 500;
 const GUESS_MAX = 100;          // Maximum length of a single guess/message (the werewolf module uses CHAT_MAX=300)
 
 const now = () => Date.now();
+
+// Normalise a word before comparing a guess against it. Chinese answers match
+// exactly either way, but English ones would not: "Cat" must count for "cat",
+// and "hot air balloon" must not hinge on getting every space right.
+// Case is folded, and every run of whitespace collapses to a single space.
+// Only ever used for the comparison -- the player's original text is what gets
+// broadcast, so a near-miss still reads the way they typed it.
+const normalizeGuess = (s) => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
 
 // Keep only the fields the canvas actually needs and clamp the coordinates back
 // into 0..1 -- a client can forge an arbitrary object, and storing it verbatim
@@ -58,14 +70,17 @@ function normalizeConfig(cfg = {}) {
   const customWords = Array.isArray(cfg.customWords)
     ? cfg.customWords.map((w) => String(w).trim()).filter(Boolean).slice(0, 100)
     : [];
-  return { drawSeconds, roundsPerPlayer, categories, customWords };
+  const wordLang = WORD_LANG_OPTIONS.includes(cfg.wordLang) ? cfg.wordLang : DEFAULTS.wordLang;
+  return { drawSeconds, roundsPerPlayer, categories, customWords, wordLang };
 }
 
 // -- Create the initial state ------------------------------------------------
 // players: [{ id, name }];  config: the host's settings (optional)
 function createInitialState(players, config) {
   const cfg = normalizeConfig(config);
-  const pool = buildWordPool({ categories: cfg.categories, customWords: cfg.customWords });
+  const pool = buildWordPool({
+    categories: cfg.categories, customWords: cfg.customWords, lang: cfg.wordLang,
+  });
   return {
     phase: 'lobby',                 // lobby | pick | draw | reveal | ended
     players: players.map((p) => ({ id: p.id, name: p.name })),
@@ -212,7 +227,7 @@ function applyAction(state, action, playerId) {
       // length (measured: 100,000 characters forwarded verbatim). The same
       // applies in the werewolf module, see CHAT_MAX.
       const guess = String(action.text || '').trim().slice(0, GUESS_MAX);
-      const correct = guess === state.word;
+      const correct = normalizeGuess(guess) === normalizeGuess(state.word);
 
       if (correct) {
         // Scoring: the more time is left the more points; the drawer also scores per player who guessed correctly
@@ -223,7 +238,8 @@ function applyAction(state, action, playerId) {
         state.scores[state.drawerId] = (state.scores[state.drawerId] || 0) + 25;
         events.push({ type: 'guessed', playerId, points: pts });
 
-        // 所有在场的非画手都猜中 → 提前结束本轮(掉线者不计,否则永远凑不齐)
+        // Every present non-drawer has guessed -> end the round early. Players who have
+        // dropped are not counted, otherwise the tally could never be completed.
         const guessers = state.players.filter(
           (p) => p.id !== state.drawerId && !state.absent[p.id]
         );
@@ -231,18 +247,18 @@ function applyAction(state, action, playerId) {
         if (allGuessed) events.push(...endRound(state, 'all_guessed'));
         return { state, events };
       } else {
-        // 猜错 → 作为普通聊天广播(不泄露正确答案)
+        // Wrong guess -> broadcast it as ordinary chat, which does not reveal the answer
         events.push({ type: 'chat', playerId, text: guess });
         return { state, events };
       }
     }
 
     case 'tick': {
-      // 服务端计时器:检查当前阶段是否到点,推进状态
+      // Server-side timer: check whether the current phase has run out and advance
       if (!state.deadline || now() < state.deadline) return { state, events };
-      if (!state.drawerId) return { state, events };   // 轮转空(全掉线挂起中),无可推进
+      if (!state.drawerId) return { state, events };   // rotation is empty (suspended while everyone is disconnected), nothing to advance
       if (state.phase === 'pick') {
-        // 画手没选 → 自动选第一个
+        // The drawer did not choose -> pick the first candidate for them
         if (state.wordChoices.length) {
           return applyAction(state, { type: 'pick', word: state.wordChoices[0] }, state.drawerId);
         }
@@ -259,8 +275,9 @@ function applyAction(state, action, playerId) {
   }
 }
 
-// ── 掉线/重连 ──────────────────────────────────────────────
-// 掉线者移出画手轮转,并且不再计入"全员猜中"。分数保留,重连可继续。
+// ── Disconnect / reconnect ─────────────────────────────────
+// A disconnected player leaves the drawer rotation and stops counting towards
+// "everyone has guessed". Their score is kept, so reconnecting resumes where they left off.
 function removePlayer(state, playerId) {
   if (!state || state.phase === 'ended') return [];
   if (!state.order.includes(playerId) && !state.absent[playerId]) return [];
@@ -269,26 +286,33 @@ function removePlayer(state, playerId) {
   const idx = state.order.indexOf(playerId);
   if (idx !== -1) {
     state.order.splice(idx, 1);
-    // 维持 turnIndex 指向"当前画手"的语义:删掉的位置在当前之前(或就是当前)时前移,
-    // 否则下一次 +1 会跳过一个人 / 重复当前这个人。
+    // Preserve the meaning of turnIndex as "the current drawer": when the removed slot is
+    // before the current one (or is the current one), shift back, otherwise the next +1
+    // would skip a player or repeat the current one.
     if (idx <= state.turnIndex) state.turnIndex -= 1;
   }
 
-  // 轮转里没人了:不就地结束对局 —— 全员短暂掉线(如切网)后仍应能重连续玩。
-  // 只把当前轮挂起(没有画手可选),真正的结束交给上层宽限期超时后的清理。
-  // 注意 startNextTurn 对空 order 取模会得到 NaN,所以这里必须提前返回。
-  // deadline 不在这里动:停表由上层按"房间还有没有连接"决定(见 pauseClock)。
+  // Nobody left in the rotation. Do not end the game here: everyone briefly dropping
+  // (switching networks, say) should still be able to reconnect and carry on.
+  // Only the current round is suspended (there is no drawer to pick); actually ending the
+  // game is left to the layer above, after its grace period expires.
+  // Note that startNextTurn would take a modulo of an empty order and get NaN, so this
+  // early return is required.
+  // deadline is deliberately untouched: stopping the clock is decided one layer up, based
+  // on whether the room still has any connections (see pauseClock).
   if (state.order.length === 0) {
     state.drawerId = null;
     return [];
   }
 
-  // 当前画手掉线 → 本轮作废,立刻进入下一轮(否则空转到超时)
+  // The current drawer dropped -> void this round and move straight to the next one,
+  // rather than spinning until the timer runs out
   if (playerId === state.drawerId && (state.phase === 'pick' || state.phase === 'draw')) {
     return startNextTurn(state);
   }
 
-  // 掉线的可能是大家在等的最后一个猜者 → 重新检查能否提前结束本轮
+  // The player who dropped may have been the last guesser everyone was waiting on, so
+  // re-check whether the round can end early
   if (state.phase === 'draw') {
     const guessers = state.players.filter(
       (p) => p.id !== state.drawerId && !state.absent[p.id]
@@ -300,30 +324,35 @@ function removePlayer(state, playerId) {
   return [];
 }
 
-// 重连:恢复在场并放回轮转队尾(分数一直保留)
+// Reconnect: mark them present again and append them to the end of the rotation (their
+// score was kept throughout)
 function restorePlayer(state, playerId) {
   if (!state || !state.absent[playerId]) return [];
   delete state.absent[playerId];
   if (state.phase === 'ended') return [];
   if (!state.order.includes(playerId)) state.order.push(playerId);
-  // 曾因轮转清空被挂起(无画手)→ 有人回来了,重新开一轮
+  // The round was suspended because the rotation had emptied (no drawer). Someone is
+  // back, so start a fresh round.
   if (!state.drawerId && state.phase !== 'lobby') {
     state.turnIndex = -1;
-    state.pausedRemainMs = null;   // 重开一轮会设新 deadline,旧的挂起值作废
+    state.pausedRemainMs = null;   // a fresh round sets a new deadline, so the parked value is void
     return startNextTurn(state);
   }
   return [];
 }
 
-// 宽限期超时仍未回来 → 永久移出,并按剩余人数收缩总轮数。
-// roundsTotal 开局按人数算死,不收缩的话 4 人局走 1 人后剩 3 人仍要打满 8 轮。
+// Still gone when the grace period expires -> remove them permanently and shrink the
+// total round count to match who is left.
+// roundsTotal is fixed from the player count at the start, so without shrinking it a
+// 4-player game losing one player would still make the remaining 3 play all 8 rounds.
 function eliminatePlayer(state, playerId) {
   if (!state || state.phase === 'ended') return [];
   const events = removePlayer(state, playerId) || [];
   delete state.absent[playerId];
   state.players = state.players.filter((p) => p.id !== playerId);
 
-  // 按当前人数重算总轮数;已打过的轮数不退,故不低于 roundsDone
+  // Recompute the total from the current player count. Rounds already played are not
+  // taken back, so the result never drops below roundsDone.
   const target = state.players.length * state.cfg.roundsPerPlayer;
   state.roundsTotal = Math.max(state.roundsDone, target);
   if (state.roundsDone >= state.roundsTotal && state.phase !== 'ended') {
@@ -335,8 +364,10 @@ function eliminatePlayer(state, playerId) {
   return events;
 }
 
-// ── 停表/恢复(由上层在"房间内一个连接都没有 / 有人重连"时调用) ──
-// 理由同 werewolf:deadline 是绝对时间戳,停表期间会继续走。
+// ── Stop / resume the clock (called from the layer above when the room drops to zero
+//    connections, or when someone reconnects) ──
+// Same reasoning as in werewolf: deadline is an absolute timestamp, so it keeps running
+// through a period when the clock is meant to be stopped.
 function pauseClock(state) {
   if (!state || state.phase === 'ended' || state.deadline == null) return;
   state.pausedRemainMs = Math.max(0, state.deadline - now());
@@ -349,19 +380,23 @@ function resumeClock(state) {
   state.pausedRemainMs = null;
 }
 
-// 谁需要整块画布?只有"收不到增量"的人:
-//   - 掉线/中途加入者(absent,或根本不在本局 order 里 —— 观战者走的就是这条)
-//   - 画布刚被清空/换轮(strokes 为空,发个空数组让前端清屏,代价为零)
-// 在场玩家靠 'stroke' 事件持续收增量,不需要每次广播都收全量。
-// 注意别在这里改 state:serializeStateFor 每次广播对每个玩家都会调用,
-// 在里面记"已同步"会让同一次广播的结果取决于成员遍历顺序。
+// Who needs the whole canvas? Only those who cannot receive increments:
+//   - players who dropped or joined mid-round (absent, or not in this game's order at
+//     all -- which is the path spectators take)
+//   - a canvas that was just cleared or rolled over to a new round (strokes is empty, so
+//     sending an empty array to make the client wipe its screen costs nothing)
+// Players who are present keep receiving increments through the 'stroke' event and do
+// not need the full set on every broadcast.
+// Do not mutate state here: serializeStateFor runs once per player on every broadcast,
+// so recording "already synced" inside it would make the result of a single broadcast
+// depend on the order members happen to be iterated in.
 function strokesFor(state, playerId) {
   if (!state.strokes.length) return [];
   const inGame = state.order.includes(playerId) && !state.absent[playerId];
   return inGame ? undefined : state.strokes;
 }
 
-// ── 序列化视图(信息隔离:画手可见词,猜者不可见) ──────────
+// ── Serialize the view (information hiding: the drawer sees the word, guessers do not) ──
 function serializeStateFor(state, playerId) {
   const isDrawer = playerId === state.drawerId;
   const view = {
@@ -373,20 +408,32 @@ function serializeStateFor(state, playerId) {
     roundsTotal: state.roundsTotal,
     deadline: state.deadline,
     hostId: state.hostId,
-    // 笔画不进常规视图:增量已经由 'stroke' 事件单独广播,这里再带一份全量,
-    // 等于每次有人猜词(chat 也走 broadcastState)就给每个人重发整块画布 ——
-    // 实测正常画满一轮后单人视图 1.2MB,8 人房一次广播近 10MB。
-    // 全量只在真正需要补画时下发(见下方 strokesFor)。
+    // Strokes stay out of the routine view. Increments are already broadcast separately
+    // through the 'stroke' event, so carrying the full set here too would mean resending
+    // the entire canvas to everyone every time someone guesses (chat also goes through
+    // broadcastState). Measured: after a normally busy round, a single player's view is
+    // 1.2MB, so one broadcast in an 8-player room approaches 10MB.
+    // The full set is only sent when a catch-up redraw is genuinely needed (see strokesFor below).
     strokes: strokesFor(state, playerId),
-    strokeRev: state.strokeRev,             // 画布版本号,前端据此判断是否需要重绘
+    strokeRev: state.strokeRev,             // canvas revision; the client uses it to decide whether a full redraw is needed
     guessed: Object.keys(state.guessedThisRound),
     isDrawer,
   };
   if (state.phase === 'pick' && isDrawer) view.wordChoices = state.wordChoices;
   if (state.phase === 'draw') {
-    // 画手看到完整词;猜者看到词长(占位),已猜中者也看到词
+    // The drawer sees the whole word; guessers see only its shape. Anyone who has
+    // already guessed correctly sees the word too.
     if (isDrawer || state.guessedThisRound[playerId]) view.word = state.word;
-    else view.wordLength = state.word ? state.word.length : 0;
+    else {
+      // Send the length of each word separately rather than one total. A Chinese
+      // answer is a single run either way, but "hot air balloon" as a flat count of
+      // 15 would render as one unbroken row of blanks that silently includes the
+      // spaces -- both ugly and misleading about the shape of the answer.
+      // wordLength is kept alongside it so an older client still renders something.
+      const w = state.word || '';
+      view.wordLengths = w ? w.split(/\s+/).filter(Boolean).map((part) => part.length) : [];
+      view.wordLength = w.length;
+    }
   }
   if (state.phase === 'reveal' || state.phase === 'ended') view.word = state.word;
   if (state.phase === 'ended') {
@@ -421,8 +468,12 @@ module.exports = {
   eliminatePlayer,
   pauseClock,
   resumeClock,
-  // 房主配置元数据(供前端设置面板)
+  // Host-configurable settings metadata, consumed by the client's settings panel
   configSchema: {
+    // Draw & Guess uses the bespoke lobby layout (see LobbySettings.jsx), so this needs
+    // no type: the client renders it explicitly and translates the option labels, since
+    // the values are language codes rather than display text.
+    wordLang: { options: WORD_LANG_OPTIONS, default: DEFAULTS.wordLang },
     drawSeconds: { options: DRAW_SECONDS_OPTIONS, default: DEFAULTS.drawSeconds },
     roundsPerPlayer: { options: ROUNDS_OPTIONS, default: DEFAULTS.roundsPerPlayer },
     categories: CATEGORIES,

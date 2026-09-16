@@ -109,9 +109,16 @@ export default function DrawGuessGame({ state, act, me, socket, onLeave }) {
     );
   }
 
+  // Placeholder shown to guessers: one blank per character, grouped per word so a
+  // multi-word English answer reads as separate words rather than one long run.
+  // Falls back to the flat wordLength if the server predates wordLengths.
   const wordHint = () => {
     if (state?.word) return state.word;
-    if (state?.wordLength) return Array(state.wordLength).fill('＿').join(' ');
+    const blanks = (n) => Array(n).fill('＿').join(' ');
+    if (state?.wordLengths?.length) {
+      return state.wordLengths.map(blanks).join('   ');
+    }
+    if (state?.wordLength) return blanks(state.wordLength);
     return '';
   };
 
