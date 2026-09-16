@@ -1,29 +1,37 @@
-// 炸弹猫(Exploding Kittens)—— 服务端权威游戏模块。
+// Exploding Kittens -- server-authoritative game module.
 //
-// 实现平台统一游戏接口:
+// Implements the platform's shared game interface:
 //   createInitialState(players, config)
 //   applyAction(state, action, playerId) -> { state, events, error }
-//   serializeStateFor(state, playerId)   -> 每人只看得到自己的手牌
+//   serializeStateFor(state, playerId)   -> everyone sees only their own hand
 //   isGameOver(state)                    -> { over, ranking } | false
 //
-// 阶段状态机:
-//   lobby → playing ⇄ nope → [favor] → [defusing] → ended
-//   playing  轮到的人可以出牌或抽牌;抽到炸弹且有拆弹 → defusing
-//   nope     刚打出一张功能牌,等其他人是否否决。否决本身也进这个窗口(可反否决)
-//   favor    被索要者挑一张牌给索要者(只有他能操作,索要者看不到他的手牌)
-//   defusing 只有当事人能操作:选炸弹塞回牌堆的位置
+// Phase state machine:
+//   lobby -> playing <-> nope -> [favor] -> [defusing] -> ended
+//   playing  the player whose turn it is may play a card or draw; drawing a bomb
+//            while holding a defuse -> defusing
+//   nope     an action card has just been played, wait and see whether anyone
+//            nopes it. A nope itself also goes through this window (so it can be
+//            noped back)
+//   favor    the player being asked picks a card to hand over (only they can act,
+//            and the asker cannot see their hand)
+//   defusing only the player concerned can act: they choose where the bomb goes
+//            back into the deck
 //
-// 信息隔离的核心:state.deck(牌堆顺序)和 state.hands(每人手牌)绝不整份下发。
-// 玩家只看得到自己的手牌 + 别人的手牌"张数"。洞悉未来的三张只发给用牌的人。
-// 所有阶段时长由房主配置,不写死。纯逻辑,不碰 socket/db(见 rules.test.js)。
+// The heart of the information hiding: state.deck (the deck order) and
+// state.hands (everyone's hands) are never sent out in full. A player sees only
+// their own hand plus the card *counts* of the others. The three cards revealed
+// by See the Future go only to the player who played it.
+// Every phase duration is configured by the host rather than hard-coded. Pure
+// logic, no socket/db access (see rules.test.js).
 
 const { CARD, CAT_CARDS, ACTION_CARDS, CARD_INFO, buildDeck } = require('./cards');
 
 const DEFAULTS = {
-  nopeSeconds: 6,      // 否决响应窗口:出功能牌后等多久看有没有人否决
-  turnSeconds: 60,     // 单回合思考时间
-  defuseSeconds: 20,   // 拆弹后选择炸弹插回位置的时间
-  favorSeconds: 20,    // 被索要时挑一张牌给出去的时间
+  nopeSeconds: 6,      // Nope response window: how long to wait after an action card for someone to nope it
+  turnSeconds: 60,     // Thinking time for a single turn
+  defuseSeconds: 20,   // Time to choose where the bomb goes back after a defuse
+  favorSeconds: 20,    // Time to pick a card to hand over when asked for a favor
 };
 const TIME_OPTIONS = {
   nopeSeconds: [3, 5, 6, 10],
@@ -51,9 +59,11 @@ function shuffle(arr) {
   return a;
 }
 
-// ── 创建初始状态 ──
-// 发牌规则:每人 1 张拆弹 + 7 张普通牌;剩余牌里塞入 (人数-1) 张炸弹和多余拆弹。
-// 炸弹比人数少 1 —— 这保证了最后必然恰好剩一个人。
+// -- Create the initial state --
+// Dealing rules: 1 defuse + 7 ordinary cards each; the leftover cards get
+// (playerCount - 1) bombs and the spare defuses mixed in. There is one bomb
+// fewer than there are players -- that is what guarantees exactly one player is
+// left standing at the end.
 function createInitialState(players, config = {}) {
   const ids = players.map((p) => p.id);
   const pool = shuffle(buildDeck(ids.length));
@@ -62,7 +72,7 @@ function createInitialState(players, config = {}) {
   for (const id of ids) {
     hands[id] = [CARD.DEFUSE, ...pool.splice(0, 7)];
   }
-  // 剩下的牌 + 炸弹 + 余下拆弹,洗匀成牌堆
+  // The remaining cards + bombs + leftover defuses, shuffled together into the deck
   const deck = [...pool];
   for (let i = 0; i < ids.length - 1; i++) deck.push(CARD.BOMB);
   const extraDefuse = Math.max(0, 6 - ids.length);
@@ -72,20 +82,20 @@ function createInitialState(players, config = {}) {
     phase: 'lobby',                   // lobby | playing | nope | defusing | ended
     cfg: normalizeConfig(config),
     players: players.map((p) => ({ id: p.id, name: p.name })),
-    hands,                            // { playerId: [card] } —— 绝不整份下发
-    deck: shuffle(deck),              // 牌堆(顶部是末尾)—— 绝不下发
-    discard: [],                      // 弃牌堆(公开)
+    hands,                            // { playerId: [card] } -- never sent out in full
+    deck: shuffle(deck),              // The deck (the top is the end of the array) -- never sent out
+    discard: [],                      // Discard pile (public)
     alive: Object.fromEntries(ids.map((id) => [id, true])),
     absent: {},
-    order: ids,                       // 座位顺序
+    order: ids,                       // Seating order
     turnIndex: 0,
-    turnsLeft: 1,                     // 当前玩家还要打几个回合(攻击会叠加)
-    pending: null,                     // 待结算的功能牌 { by, card, payload, nopes }
-    defusing: null,                    // { playerId } 正在选炸弹插回位置
-    favor: null,                       // { from, to } 被索要者正在挑牌给索要者
-    future: {},                        // { playerId: [card,card,card] } 洞悉未来的结果,仅本人可见
-    lastAction: null,                  // 公开的最近一次动作播报
-    ranking: [],                       // 出局顺序(倒序即名次)
+    turnsLeft: 1,                     // How many more turns the current player owes (attacks stack)
+    pending: null,                     // Action card awaiting resolution { by, card, payload, nopes }
+    defusing: null,                    // { playerId } currently choosing where to put the bomb back
+    favor: null,                       // { from, to } the asked player is picking a card for the asker
+    future: {},                        // { playerId: [card,card,card] } See the Future result, visible only to that player
+    lastAction: null,                  // Public announcement of the most recent action
+    ranking: [],                       // Elimination order (reversed, this is the final placing)
     deadline: null,
     pausedRemainMs: null,
     log: [],
@@ -102,11 +112,12 @@ function setDeadline(s, seconds) {
   s.pausedRemainMs = null;
 }
 
-// 轮到下一个存活玩家。攻击造成的多回合由 turnsLeft 表达:
-// 还有剩余回合就不换人,只是重新计时。
+// Move to the next living player. The extra turns caused by an attack are
+// expressed through turnsLeft: while turns remain the seat does not change, the
+// clock is simply restarted.
 function nextTurn(s, extraTurns = 0) {
   if (extraTurns > 0) {
-    // 攻击:当前玩家结束,下家要打 extraTurns 个回合
+    // Attack: the current player is done, the next one has to take extraTurns turns
     advanceSeat(s);
     s.turnsLeft = extraTurns;
   } else {
@@ -129,11 +140,12 @@ function advanceSeat(s) {
   }
 }
 
-// 出局。炸弹猫是淘汰制,名次按出局顺序倒推。
+// Knock a player out. Exploding Kittens is an elimination game, so placings are
+// derived by reversing the order in which players went out.
 function eliminate(s, id, reason) {
   if (!s.alive[id]) return;
   s.alive[id] = false;
-  s.ranking.unshift(id);          // 越晚出局排名越前
+  s.ranking.unshift(id);          // The later you go out, the higher you place
   s.discard.push(...(s.hands[id] || []));
   s.hands[id] = [];
   s.log.push({ type: 'eliminated', playerId: id, reason });
@@ -150,7 +162,8 @@ function checkWin(s) {
   return false;
 }
 
-// 从手牌移除若干张指定牌;返回是否成功(不够就不动)
+// Remove the given cards from a hand; returns the new hand, or null if the hand
+// does not hold them all (in which case nothing is changed)
 function takeFromHand(hand, cards) {
   const copy = [...hand];
   for (const c of cards) {
@@ -161,9 +174,11 @@ function takeFromHand(hand, cards) {
   return copy;
 }
 
-// ── 否决窗口 ──
-// 所有功能牌打出后先进 pending,等 nopeSeconds。期间任何存活玩家可以出否决牌。
-// 否决数为奇数 → 被否决(不生效);偶数 → 生效。这样"否决的否决"自然成立。
+// -- Nope window --
+// Every action card played first goes into pending and waits nopeSeconds. During
+// that time any living player may play a nope card. An odd number of nopes means
+// the card is noped (does not take effect); an even number means it takes
+// effect. This makes "noping a nope" work naturally.
 function openNopeWindow(s, by, card, payload) {
   s.pending = { by, card, payload: payload || {}, nopes: [] };
   s.phase = 'nope';
@@ -171,7 +186,7 @@ function openNopeWindow(s, by, card, payload) {
   s.log.push({ type: 'played', playerId: by, card });
 }
 
-// 结算 pending:根据否决次数决定生效与否
+// Resolve pending: the number of nopes decides whether the card takes effect
 function resolvePending(s) {
   const p = s.pending;
   if (!p) { nextTurn(s); return; }
@@ -180,7 +195,7 @@ function resolvePending(s) {
   const nopedOut = p.nopes.length % 2 === 1;
   s.log.push({ type: 'resolved', playerId: p.by, card: p.card, noped: nopedOut });
   if (nopedOut) {
-    // 被否决:牌作废,回合继续(出牌者仍在自己的回合里)
+    // Noped: the card is void and the turn continues (the player who played it is still in their own turn)
     s.phase = 'playing';
     setDeadline(s, s.cfg.turnSeconds);
     return;
@@ -188,7 +203,7 @@ function resolvePending(s) {
   applyCardEffect(s, p.by, p.card, p.payload);
 }
 
-// 功能牌真正生效
+// Where an action card actually takes effect
 function applyCardEffect(s, by, card, payload) {
   switch (card) {
     case CARD.SKIP:
@@ -206,15 +221,17 @@ function applyCardEffect(s, by, card, payload) {
       return;
 
     case CARD.FUTURE:
-      // 只给出牌者看顶部三张 —— 这是本模块唯一"部分可见"的隐藏信息
+      // Only the player who played the card sees the top three -- this is the module's only piece of partially visible hidden information
       s.future[by] = s.deck.slice(-3).reverse();
       s.phase = 'playing';
       setDeadline(s, s.cfg.turnSeconds);
       return;
 
     case CARD.FAVOR: {
-      // 原版:由被索要的人自己挑一张给出去(所以他会给最没用的那张)。
-      // 这需要一个等待阶段 —— 和拆弹一样,只有当事人能操作。
+      // As in the original game: the player being asked picks the card to hand
+      // over themselves (which is why they will hand over their most useless one).
+      // That needs a waiting phase -- and like defusing, only the player
+      // concerned can act in it.
       const target = payload.target;
       if (target && s.alive[target] && s.hands[target]?.length) {
         s.favor = { from: target, to: by };
@@ -223,14 +240,14 @@ function applyCardEffect(s, by, card, payload) {
         s.log.push({ type: 'favor_asked', playerId: by, target });
         return;
       }
-      // 对方没牌可给:直接过
+      // The target has no cards to give: just move on
       s.phase = 'playing';
       setDeadline(s, s.cfg.turnSeconds);
       return;
     }
 
     case 'cat_pair': {
-      // 两张同款猫咪 → 随机偷目标一张
+      // Two matching cat cards -> steal a random card from the target
       const target = payload.target;
       if (target && s.alive[target] && s.hands[target]?.length) {
         const hand = s.hands[target];
@@ -245,9 +262,11 @@ function applyCardEffect(s, by, card, payload) {
     }
 
     case 'cat_three': {
-      // 三张同款 → 指名要牌:对方有就必须给,没有则落空。
-      // 落空也要公开播报 —— "他没有拆弹"本身就是有价值的公开信息,
-      // 这正是三张牌的战术意义(试探)。
+      // Three matching cards -> name a card: if the target has it they must hand
+      // it over, otherwise the demand comes up empty.
+      // An empty demand is announced publicly too -- "he has no defuse" is itself
+      // valuable public information, and that is exactly the tactical point of
+      // the three-card play (probing).
       const target = payload.target;
       const wanted = payload.wanted;
       let got = null;
@@ -267,7 +286,7 @@ function applyCardEffect(s, by, card, payload) {
     }
 
     case 'cat_five': {
-      // 五张不同 → 从弃牌堆任选一张。弃牌堆是公开的,拿走什么大家都看得到。
+      // Five different cards -> take any card from the discard pile. The discard pile is public, so everyone sees what was taken.
       const wanted = payload.wanted;
       const i = s.discard.indexOf(wanted);
       if (i >= 0) {
@@ -287,8 +306,9 @@ function applyCardEffect(s, by, card, payload) {
   }
 }
 
-// 把被索要者手里第 i 张牌交给索要者,回到索要者的回合。
-// 抽出成函数是因为有两个入口:本人主动给,和超时随机给。
+// Hand the i-th card of the asked player's hand to the asker and return to the
+// asker's turn. This is pulled out into a function because there are two ways in:
+// the player giving a card deliberately, and a random card being given on timeout.
 function giveFavorCard(s, index) {
   const f = s.favor;
   if (!f) return;
@@ -298,21 +318,21 @@ function giveFavorCard(s, index) {
   s.lastAction = { type: 'favor', by: f.to, target: f.from };
   s.log.push({ type: 'favor_given', playerId: f.from, target: f.to });
   s.favor = null;
-  // 回合仍属索要者 —— 索要不结束回合
+  // The turn still belongs to the asker -- asking for a favor does not end the turn
   s.phase = 'playing';
   setDeadline(s, s.cfg.turnSeconds);
 }
 
-// 抽一张牌,结束回合。抽到炸弹要特殊处理。
+// Draw a card and end the turn. Drawing a bomb needs special handling.
 function drawCard(s, playerId) {
   const events = [];
   if (!s.deck.length) {
-    // 牌堆空了(极端情况):直接进入下一回合
+    // The deck is empty (an edge case): just move on to the next turn
     nextTurn(s);
     return events;
   }
   const card = s.deck.pop();
-  delete s.future[playerId];        // 抽过牌,之前偷看的信息作废
+  delete s.future[playerId];        // Once you have drawn, the cards you peeked at earlier are stale
 
   if (card !== CARD.BOMB) {
     s.hands[playerId].push(card);
@@ -321,17 +341,17 @@ function drawCard(s, playerId) {
     return events;
   }
 
-  // 抽到炸弹
+  // A bomb was drawn
   s.log.push({ type: 'drew_bomb', playerId });
   const hand = s.hands[playerId];
   const defuseIdx = hand.indexOf(CARD.DEFUSE);
   if (defuseIdx < 0) {
-    // 没有拆弹 → 出局
+    // No defuse -> knocked out
     s.discard.push(card);
     eliminate(s, playerId, 'bomb');
     events.push({ type: 'exploded', playerId });
     if (!checkWin(s)) {
-      // 出局者的回合直接结束,轮到下一位
+      // The eliminated player's turn simply ends, and play passes to the next player
       s.turnsLeft = 1;
       advanceSeat(s);
       s.phase = 'playing';
@@ -340,7 +360,7 @@ function drawCard(s, playerId) {
     return events;
   }
 
-  // 有拆弹 → 化解,并进入"选择炸弹插回位置"
+  // Holding a defuse -> the bomb is defused, and we move on to choosing where it goes back into the deck
   hand.splice(defuseIdx, 1);
   s.discard.push(CARD.DEFUSE);
   s.defusing = { playerId, bomb: card };
@@ -351,26 +371,26 @@ function drawCard(s, playerId) {
   return events;
 }
 
-// ── 应用动作 ──
-// { type:'start' }                           房主开始
-// { type:'play', cards:[card], target? }     出牌(功能牌或成对猫咪)
-// { type:'nope' }                            否决(仅 nope 阶段)
-// { type:'draw' }                            主动抽牌结束回合
-// { type:'place_bomb', position }            拆弹后把炸弹塞回牌堆
-// { type:'tick' }                            服务端计时器
+// -- Apply an action --
+// { type:'start' }                           the host starts the game
+// { type:'play', cards:[card], target? }     play a card (an action card or a set of cat cards)
+// { type:'nope' }                            nope (only during the nope phase)
+// { type:'draw' }                            deliberately draw a card and end the turn
+// { type:'place_bomb', position }            after defusing, slip the bomb back into the deck
+// { type:'tick' }                            the server-side timer
 function applyAction(s, action, playerId) {
   const events = [];
 
-  // 观战者与非本局玩家不能行动(tick 由服务端驱动,playerId 为 null)
+  // Spectators and anyone not in this game cannot act (tick is server-driven, with playerId null)
   if (action.type !== 'tick' && !(playerId in s.alive)) {
-    return { error: '你不是本局玩家' };
+    return { error: 'game.notAPlayer' };
   }
 
   switch (action.type) {
     case 'start': {
-      if (playerId !== s.hostId) return { error: '只有房主能开始' };
-      if (s.phase !== 'lobby') return { error: '游戏已开始' };
-      if (s.players.length < 2) return { error: '至少需要 2 名玩家' };
+      if (playerId !== s.hostId) return { error: 'room.hostOnlyStart' };
+      if (s.phase !== 'lobby') return { error: 'room.alreadyStarted' };
+      if (s.players.length < 2) return { error: 'room.needTwoPlayers' };
       s.phase = 'playing';
       s.turnIndex = 0;
       s.turnsLeft = 1;
@@ -378,26 +398,26 @@ function applyAction(s, action, playerId) {
       return { state: s, events };
     }
 
-    // 否决:任何存活玩家都能出,不限于当前回合的人
+    // Nope: any living player may play one, not just the player whose turn it is
     case 'nope': {
-      if (s.phase !== 'nope' || !s.pending) return { error: '现在没有可否决的牌' };
-      if (!s.alive[playerId]) return { error: '你已出局' };
+      if (s.phase !== 'nope' || !s.pending) return { error: 'kittens.nothingToNope' };
+      if (!s.alive[playerId]) return { error: 'game.youAreOut' };
       const hand = takeFromHand(s.hands[playerId], [CARD.NOPE]);
-      if (!hand) return { error: '你没有否决牌' };
+      if (!hand) return { error: 'kittens.noNopeCard' };
       s.hands[playerId] = hand;
       s.discard.push(CARD.NOPE);
       s.pending.nopes.push(playerId);
-      // 每次否决都重开窗口 —— 否决可以被再否决
+      // Every nope reopens the window -- a nope can itself be noped
       setDeadline(s, s.cfg.nopeSeconds);
       s.log.push({ type: 'noped', playerId });
       return { state: s, events };
     }
 
     case 'play': {
-      if (s.phase !== 'playing') return { error: '现在不能出牌' };
-      if (playerId !== currentPlayer(s)) return { error: '还没轮到你' };
+      if (s.phase !== 'playing') return { error: 'kittens.cannotPlay' };
+      if (playerId !== currentPlayer(s)) return { error: 'game.notYourTurn' };
       const cards = Array.isArray(action.cards) ? action.cards : [];
-      if (!cards.length) return { error: '没有选牌' };
+      if (!cards.length) return { error: 'kittens.noCardsSelected' };
 
       const allCats = cards.every((c) => CAT_CARDS.includes(c));
       const sameCat = allCats && cards.every((c) => c === cards[0]);
@@ -408,10 +428,10 @@ function applyAction(s, action, playerId) {
         return null;
       };
 
-      // 两张同款 → 随机偷一张
+      // Two of a kind -> steal a random card
       if (cards.length === 2 && sameCat) {
         const rest = takeFromHand(s.hands[playerId], cards);
-        if (!rest) return { error: '你没有这些牌' };
+        if (!rest) return { error: 'kittens.missingCards' };
         const bad = needTarget();
         if (bad) return { error: bad };
         s.hands[playerId] = rest;
@@ -420,26 +440,28 @@ function applyAction(s, action, playerId) {
         return { state: s, events };
       }
 
-      // 三张同款 → 指名要牌:说出一个牌名,对方有就必须给,没有则落空。
-      // 这是唯一能定向拿到指定牌(比如拆弹)的手段,所以要求先报牌名。
+      // Three of a kind -> name a card: you call out a card name, and if the
+      // target has it they must hand it over, otherwise the demand comes up empty.
+      // This is the only way to go after one specific card (a defuse, say), which
+      // is why the card name has to be declared up front.
       if (cards.length === 3 && sameCat) {
         const rest = takeFromHand(s.hands[playerId], cards);
-        if (!rest) return { error: '你没有这些牌' };
+        if (!rest) return { error: 'kittens.missingCards' };
         const bad = needTarget();
         if (bad) return { error: bad };
-        if (!action.wanted || !CARD_INFO[action.wanted]) return { error: '请指定要什么牌' };
+        if (!action.wanted || !CARD_INFO[action.wanted]) return { error: 'kittens.nameACard' };
         s.hands[playerId] = rest;
         s.discard.push(...cards);
         openNopeWindow(s, playerId, 'cat_three', { target: action.target, wanted: action.wanted });
         return { state: s, events };
       }
 
-      // 五张各不相同 → 从弃牌堆任选一张。弃牌堆本来就是公开信息,不涉及隐藏。
+      // Five all different -> take any card from the discard pile. The discard pile is public information anyway, so no hidden information is involved.
       if (cards.length === 5 && allCats && new Set(cards).size === 5) {
         const rest = takeFromHand(s.hands[playerId], cards);
-        if (!rest) return { error: '你没有这些牌' };
-        if (!action.wanted || !CARD_INFO[action.wanted]) return { error: '请从弃牌堆指定一张牌' };
-        if (!s.discard.includes(action.wanted)) return { error: '弃牌堆里没有这张牌' };
+        if (!rest) return { error: 'kittens.missingCards' };
+        if (!action.wanted || !CARD_INFO[action.wanted]) return { error: 'kittens.pickFromDiscard' };
+        if (!s.discard.includes(action.wanted)) return { error: 'kittens.notInDiscard' };
         s.hands[playerId] = rest;
         s.discard.push(...cards);
         openNopeWindow(s, playerId, 'cat_five', { wanted: action.wanted });
@@ -447,17 +469,17 @@ function applyAction(s, action, playerId) {
       }
 
       if (cards.length !== 1) {
-        return { error: '只能出:一张功能牌 / 两张或三张同款猫咪 / 五张不同猫咪' };
+        return { error: 'kittens.badCombo' };
       }
       const card = cards[0];
-      if (!ACTION_CARDS.includes(card)) return { error: '这张牌不能单独打出' };
+      if (!ACTION_CARDS.includes(card)) return { error: 'kittens.cannotPlayAlone' };
       if (card === CARD.FAVOR) {
         if (!action.target || !s.alive[action.target] || action.target === playerId) {
-          return { error: '索要需要指定一名有效目标' };
+          return { error: 'kittens.favorNeedsTarget' };
         }
       }
       const rest = takeFromHand(s.hands[playerId], [card]);
-      if (!rest) return { error: '你没有这张牌' };
+      if (!rest) return { error: 'kittens.missingCard' };
       s.hands[playerId] = rest;
       s.discard.push(card);
       openNopeWindow(s, playerId, card, { target: action.target });
@@ -465,35 +487,37 @@ function applyAction(s, action, playerId) {
     }
 
     case 'draw': {
-      if (s.phase !== 'playing') return { error: '现在不能抽牌' };
-      if (playerId !== currentPlayer(s)) return { error: '还没轮到你' };
+      if (s.phase !== 'playing') return { error: 'kittens.cannotDraw' };
+      if (playerId !== currentPlayer(s)) return { error: 'game.notYourTurn' };
       events.push(...drawCard(s, playerId));
       return { state: s, events };
     }
 
-    // 拆弹后把炸弹塞回牌堆。position 从牌堆顶算起(0 = 下一个人立刻抽到)
+    // After defusing, slip the bomb back into the deck. position counts from the top of the deck (0 = the next player draws it immediately)
     case 'place_bomb': {
-      if (s.phase !== 'defusing') return { error: '现在不用放置炸弹' };
-      if (!s.defusing || playerId !== s.defusing.playerId) return { error: '不是你在拆弹' };
+      if (s.phase !== 'defusing') return { error: 'kittens.noPlaceNeeded' };
+      if (!s.defusing || playerId !== s.defusing.playerId) return { error: 'kittens.notYourDefuse' };
       const bomb = s.defusing.bomb;
       const max = s.deck.length;
       let pos = Number.isInteger(action.position) ? action.position : Math.floor(Math.random() * (max + 1));
       pos = Math.min(max, Math.max(0, pos));
-      // deck 末尾是顶部,所以"从顶部数第 pos 张"= 插在 length - pos
+      // The end of deck is the top, so "the pos-th card counting from the top" = inserting at length - pos
       s.deck.splice(max - pos, 0, bomb);
       s.defusing = null;
       nextTurn(s);
       return { state: s, events };
     }
 
-    // 被索要者挑一张牌给对方。只有他自己能操作 —— 索要者不能替他选,
-    // 也看不到他有什么牌(这正是"给最没用的那张"这个博弈的前提)。
+    // The asked player picks a card to hand over. Only they can do it -- the
+    // asker cannot choose on their behalf, and cannot see what cards they hold
+    // (which is exactly the premise of the "hand over your most useless card"
+    // mind game).
     case 'give_card': {
-      if (s.phase !== 'favor' || !s.favor) return { error: '现在不用给牌' };
-      if (playerId !== s.favor.from) return { error: '不是你在给牌' };
+      if (s.phase !== 'favor' || !s.favor) return { error: 'kittens.noGiveNeeded' };
+      if (playerId !== s.favor.from) return { error: 'kittens.notYourGive' };
       const hand = s.hands[playerId] || [];
       const i = typeof action.index === 'number' ? action.index : hand.indexOf(action.card);
-      if (i < 0 || i >= hand.length) return { error: '请选择一张手牌' };
+      if (i < 0 || i >= hand.length) return { error: 'kittens.pickOneCard' };
       giveFavorCard(s, i);
       return { state: s, events };
     }
@@ -503,12 +527,12 @@ function applyAction(s, action, playerId) {
       if (s.phase === 'nope') {
         resolvePending(s);
       } else if (s.phase === 'favor') {
-        // 超时不给 → 随机抽一张给出去,避免拖延战术
+        // Nothing given before the timeout -> hand over a random card, so stalling is not a viable tactic
         const hand = s.hands[s.favor?.from] || [];
         if (hand.length) giveFavorCard(s, Math.floor(Math.random() * hand.length));
         else { s.favor = null; s.phase = 'playing'; setDeadline(s, s.cfg.turnSeconds); }
       } else if (s.phase === 'defusing') {
-        // 超时:随机位置塞回
+        // Timed out: put the bomb back at a random position
         const bomb = s.defusing?.bomb;
         if (bomb) {
           const pos = Math.floor(Math.random() * (s.deck.length + 1));
@@ -517,7 +541,7 @@ function applyAction(s, action, playerId) {
         s.defusing = null;
         nextTurn(s);
       } else if (s.phase === 'playing') {
-        // 回合超时:强制抽牌(这也是原版的自然结果 —— 你总得抽)
+        // Turn timed out: force a draw (which is also the natural outcome in the original game -- you have to draw sooner or later)
         const cur = currentPlayer(s);
         if (cur) events.push(...drawCard(s, cur));
       }
@@ -525,20 +549,20 @@ function applyAction(s, action, playerId) {
     }
 
     default:
-      return { error: '未知动作' };
+      return { error: 'game.unknownAction' };
   }
 }
 
-// ── 掉线/重连/离开 ──
+// -- Disconnect / reconnect / leave --
 function removePlayer(s, playerId) {
   if (!s || !(playerId in s.alive)) return;
   s.absent[playerId] = true;
   if (s.phase === 'ended') return;
-  // 轮到掉线者时不要卡住:直接替他抽牌结束回合
+  // Do not stall when it is the disconnected player's turn: draw on their behalf to end the turn
   if (s.phase === 'playing' && currentPlayer(s) === playerId && presentIds(s).length) {
     drawCard(s, playerId);
   }
-  // 正在给牌的人掉线 → 随机给一张,别让索要者干等满整个窗口
+  // The player who owes a card disconnects -> give a random one, rather than making the asker wait out the whole window
   if (s.phase === 'favor' && s.favor?.from === playerId) {
     const hand = s.hands[playerId] || [];
     if (hand.length) giveFavorCard(s, Math.floor(Math.random() * hand.length));
@@ -551,7 +575,7 @@ function restorePlayer(s, playerId) {
   delete s.absent[playerId];
 }
 
-// 宽限期后真正离开 → 判出局并重跑胜负
+// Actually gone once the grace period expires -> knock them out and re-check for a winner
 function eliminatePlayer(s, playerId) {
   if (!s || s.phase === 'ended' || !s.alive[playerId]) return [];
   const wasCurrent = currentPlayer(s) === playerId;
@@ -578,9 +602,10 @@ function resumeClock(s) {
   s.pausedRemainMs = null;
 }
 
-// ── 分玩家序列化视图(信息隔离) ──
-// 白名单构造。绝不放 deck(牌堆顺序)和 hands(所有人手牌)——
-// 前者泄露了炸弹在哪,后者泄露了所有人握着什么。
+// -- Per-player serialized view (information hiding) --
+// Built from a whitelist. Never include deck (the deck order) or hands
+// (everyone's hands) -- the former gives away where the bombs are, the latter
+// gives away what everyone is holding.
 function serializeStateFor(s, playerId) {
   const view = {
     phase: s.phase,
@@ -588,18 +613,18 @@ function serializeStateFor(s, playerId) {
       id: p.id, name: p.name,
       alive: !!s.alive[p.id],
       absent: !!s.absent[p.id],
-      handCount: (s.hands[p.id] || []).length,   // 只给张数,不给内容
+      handCount: (s.hands[p.id] || []).length,   // Only the count, never the contents
     })),
     myId: playerId,
-    myHand: s.hands[playerId] ? [...s.hands[playerId]] : [],  // 只有自己的手牌
+    myHand: s.hands[playerId] ? [...s.hands[playerId]] : [],  // Your own hand only
     alive: !!s.alive[playerId],
     currentPlayer: currentPlayer(s),
     isMyTurn: currentPlayer(s) === playerId && s.phase === 'playing',
     turnsLeft: s.turnsLeft,
-    deckCount: s.deck.length,                     // 只给剩余张数,不给顺序
+    deckCount: s.deck.length,                     // Only how many cards are left, never the order
     discardTop: s.discard[s.discard.length - 1] ?? null,
     discardCount: s.discard.length,
-    // 弃牌堆内容是公开的(桌上摊着的牌),五张不同猫咪要从这里挑
+    // The contents of the discard pile are public (the cards are face up on the table), and the five-different-cats play picks from here
     discard: [...s.discard],
     log: s.log.slice(-30),
     lastAction: s.lastAction,
@@ -608,38 +633,39 @@ function serializeStateFor(s, playerId) {
     cfg: s.cfg,
   };
 
-  // 否决窗口:大家都要看到"谁打了什么牌、被否决了几次",否则没法决定要不要否决
+  // Nope window: everyone needs to see who played what and how many nopes it has drawn, otherwise they cannot decide whether to nope it themselves
   if (s.phase === 'nope' && s.pending) {
     view.pending = {
       by: s.pending.by,
       card: s.pending.card,
       target: s.pending.payload?.target ?? null,
-      // 要什么牌是公开的 —— 大家听得到他喊"给我拆弹",这也是决定要不要否决的依据
+      // Which card is being demanded is public -- everyone hears him call out "give me your defuse", and that too is a basis for deciding whether to nope
       wanted: s.pending.payload?.wanted ?? null,
       nopeCount: s.pending.nopes.length,
     };
     view.iCanNope = !!s.alive[playerId] && (s.hands[playerId] || []).includes(CARD.NOPE);
   }
 
-  // 索要:只有被索要者能挑牌。索要者看不到对方手里有什么 ——
-  // "给最没用的那张"这个博弈,前提就是索要者不知道对方在藏什么。
+  // Favor: only the asked player can pick a card. The asker cannot see what the
+  // other player holds -- the "hand over your most useless card" mind game works
+  // precisely because the asker does not know what they are hiding.
   if (s.phase === 'favor' && s.favor) {
     view.favorFrom = s.favor.from;
     view.favorTo = s.favor.to;
     view.iAmGiving = s.favor.from === playerId;
   }
 
-  // 拆弹:只有当事人能看到自己在拆弹并选择位置。别人只知道"有人在拆弹"。
+  // Defusing: only the player concerned sees that they are defusing and gets to choose the position. Everyone else only knows that someone is defusing.
   if (s.phase === 'defusing' && s.defusing) {
     view.defusingBy = s.defusing.playerId;
     view.iAmDefusing = s.defusing.playerId === playerId;
     if (view.iAmDefusing) view.deckSize = s.deck.length;
   }
 
-  // 洞悉未来:只发给用了牌的人
+  // See the future: sent only to the player who played the card
   if (s.future[playerId]) view.myFuture = s.future[playerId];
 
-  // 结束时公开名次
+  // Placings become public once the game is over
   if (s.phase === 'ended') {
     view.ranking = s.ranking.map((id) => ({
       id, name: s.players.find((p) => p.id === id)?.name || '玩家',

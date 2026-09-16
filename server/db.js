@@ -1,8 +1,8 @@
-// 数据库层 —— Postgres(Supabase)持久化,带内存降级。
+// Database layer —— Postgres (Supabase) persistence, with an in-memory fallback.
 //
-// 若设置了 DATABASE_URL(线上/Supabase) → 用 Postgres。
-// 否则(本地开发无数据库) → 用内存 Map,零配置即可跑。
-// 上层(auth / 战绩)调用同一组异步方法,不感知底层实现。
+// If DATABASE_URL is set (production / Supabase) → use Postgres.
+// Otherwise (local development with no database) → use an in-memory Map, so it runs with zero configuration.
+// The layers above (auth / match records) call the same set of async methods and are unaware of the underlying implementation.
 
 const bcrypt = require('bcryptjs');
 
@@ -14,14 +14,14 @@ if (usePg) {
   const { Pool } = require('pg');
   pool = new Pool({
     connectionString: DATABASE_URL,
-    ssl: { rejectUnauthorized: false }, // Supabase 需要 SSL
+    ssl: { rejectUnauthorized: false }, // Supabase requires SSL
   });
 }
 
-// ── 内存降级存储 ──
+// ── In-memory fallback storage ──
 const mem = { users: new Map(), nextUserId: 1 };
 
-// ── 用户 ──
+// ── Users ──
 async function createUser(email, password, name) {
   const passwordHash = await bcrypt.hash(password, 10);
   const displayName = name || email.split('@')[0];
@@ -33,11 +33,11 @@ async function createUser(email, password, name) {
       );
       return { user: rows[0] };
     } catch (e) {
-      if (e.code === '23505') return { error: '邮箱已注册' }; // unique_violation
+      if (e.code === '23505') return { error: 'auth.emailTaken' }; // unique_violation
       throw e;
     }
   }
-  if (mem.users.has(email)) return { error: '邮箱已注册' };
+  if (mem.users.has(email)) return { error: 'auth.emailTaken' };
   const user = { id: mem.nextUserId++, email, passwordHash, name: displayName };
   mem.users.set(email, user);
   return { user: { id: user.id, email: user.email, name: user.name } };
@@ -51,16 +51,16 @@ async function loginUser(email, password) {
   } else {
     record = mem.users.get(email);
   }
-  if (!record) return { error: '邮箱或密码错误' };
+  if (!record) return { error: 'auth.badCredentials' };
   const hash = record.password_hash || record.passwordHash;
   const ok = await bcrypt.compare(password, hash);
-  if (!ok) return { error: '邮箱或密码错误' };
+  if (!ok) return { error: 'auth.badCredentials' };
   return { user: { id: record.id, email: record.email, name: record.name } };
 }
 
-// ── 战绩(登录用户才写;失败不影响游戏) ──
+// ── Match records (only written for logged-in users; a failure does not affect the game) ──
 async function saveGameResult(gameId, roomCode, ranking) {
-  if (!usePg) return; // 内存模式不持久化战绩
+  if (!usePg) return; // memory mode does not persist match records
   try {
     const { rows } = await pool.query(
       'INSERT INTO game_results (game_id, room_code) VALUES ($1, $2) RETURNING id',
@@ -81,14 +81,14 @@ async function saveGameResult(gameId, roomCode, ranking) {
   }
 }
 
-// 初始化(线上首启时可自动建表;Supabase 也可手工跑 schema.sql)
+// Initialization (can create the tables automatically on the first production startup; on Supabase you can also run schema.sql by hand)
 async function ensureSchema() {
-  if (!usePg) { console.log('📦 无 DATABASE_URL,使用内存存储(开发模式)'); return; }
+  if (!usePg) { console.log('📦 No DATABASE_URL, using in-memory storage (development mode)'); return; }
   const fs = require('fs');
   const path = require('path');
   const sql = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
   await pool.query(sql);
-  console.log('🐘 Postgres schema 就绪');
+  console.log('🐘 Postgres schema ready');
 }
 
 module.exports = { usePg, createUser, loginUser, saveGameResult, ensureSchema };

@@ -1,17 +1,20 @@
-// 认证路由 —— 走 db 层(Postgres 或内存降级),返回 { token, user }。
+// Auth routes —— they go through the db layer (Postgres or the in-memory fallback) and return { token, user }.
 const crypto = require('crypto');
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const db = require('../db');
 
-// JWT 密钥。这里绝不能有硬编码兜底值:密钥写在开源代码里 = 任何人都能签出
-// 任意用户的 token(socket 层认 token 里的 id,伪造后可顶替他人重连进房间,
-// 战绩也会记到别人名下)。而且这种降级是无声的 —— 服务照常启动,登录照常工作。
+// The JWT secret. There must never be a hardcoded fallback value here: a secret written into open-source code
+// means anyone can sign a token for any user (the socket layer trusts the id inside the token, so a forged one
+// lets an attacker take someone else's place when reconnecting into a room, and the match record would be
+// credited to that other person too). Worse, such a degradation is silent —— the service starts as usual and
+// logging in works as usual.
 //
-// 所以按环境分两条路,都不给"看起来能用的假密钥":
-//   生产(有 DATABASE_URL,即真在存用户)→ 缺密钥直接退出,不启动。
-//   本地开发 → 用每次启动随机生成的密钥。随机而非固定,是为了让重启后旧 token
-//             自然失效,避免"本地一直能用"给人线上也没问题的错觉。
+// So there are two paths depending on the environment, and neither hands out a "fake secret that looks usable":
+//   Production (DATABASE_URL is set, i.e. real users are actually being stored) → exit on a missing secret, do not start.
+//   Local development → use a secret generated randomly on each startup. Random rather than fixed, so that old
+//             tokens expire naturally after a restart, avoiding the illusion that because "it always works
+//             locally" it must be fine in production too.
 const IS_PROD = !!process.env.DATABASE_URL;
 const JWT_SECRET = resolveSecret();
 
@@ -22,13 +25,13 @@ function resolveSecret() {
   if (IS_PROD) {
     console.error(
       fromEnv
-        ? '❌ JWT_SECRET 太短(至少 16 字符),拒绝启动。'
-        : '❌ 检测到 DATABASE_URL(生产环境)但未设置 JWT_SECRET,拒绝启动。\n' +
-          '   没有密钥就无法安全签发登录态。请在部署平台设置 JWT_SECRET(Render 可用 generateValue)。'
+        ? '❌ JWT_SECRET is too short (at least 16 characters), refusing to start.'
+        : '❌ DATABASE_URL detected (production environment) but JWT_SECRET is not set, refusing to start.\n' +
+          '   Without a secret, login sessions cannot be issued securely. Please set JWT_SECRET on your deployment platform (on Render you can use generateValue).'
     );
     process.exit(1);
   }
-  console.warn('⚠️  未设置 JWT_SECRET,本次启动使用随机密钥(重启后登录态失效)。仅供本地开发。');
+  console.warn('⚠️  JWT_SECRET is not set, this startup is using a random secret (login sessions expire after a restart). For local development only.');
   return crypto.randomBytes(32).toString('hex');
 }
 
@@ -36,24 +39,29 @@ const router = express.Router();
 
 const sign = (u) => jwt.sign({ id: u.id, email: u.email, name: u.name }, JWT_SECRET, { expiresIn: '30d' });
 
-// bcrypt 在 72 字节处截断,超出部分完全不参与哈希 —— 不挡住的话,用户设了
-// 100 字的密码,实际只有前 72 字有效,而且 72 字和 100 字的密码会互相通过校验。
-// 与其静默截断,不如直接拒绝并说明。
+// bcrypt truncates at 72 bytes, and anything beyond that takes no part in the hash at all —— if this is not
+// blocked, a user who sets a 100-character password really only has the first 72 characters in effect, and the
+// 72-character and 100-character passwords will both pass verification against each other.
+// Rather than truncating silently, it is better to reject outright and explain why.
 const PASSWORD_MIN = 8;
 const PASSWORD_MAX = 72;
-const NAME_MAX = 20;          // 昵称会广播给全房间,需有上限
-const EMAIL_MAX = 254;        // RFC 5321 的地址长度上限
+const NAME_MAX = 20;          // display names are broadcast to the whole room, so they need an upper bound
+const EMAIL_MAX = 254;        // the address length limit from RFC 5321
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-// 返回错误字符串;通过校验则返回 null。
+// Returns an error code, or null if validation passes.
+// Two of these codes need a number in the message, so they carry it as a suffix
+// after a colon: the client splits on ':' and interpolates (see serverError()).
+// Keeping the number out of the code itself means the limits can change without
+// touching either translation table.
 function validateCredentials(email, password) {
-  if (!email || !password) return '请填写邮箱和密码';
-  if (typeof email !== 'string' || typeof password !== 'string') return '参数格式错误';
-  if (email.length > EMAIL_MAX || !EMAIL_RE.test(email)) return '邮箱格式不正确';
-  // 按字节数算:中文密码一个字最多 4 字节,用长度判断会漏
+  if (!email || !password) return 'auth.missingFields';
+  if (typeof email !== 'string' || typeof password !== 'string') return 'auth.badParams';
+  if (email.length > EMAIL_MAX || !EMAIL_RE.test(email)) return 'auth.badEmail';
+  // Measured in bytes: a Chinese password character is up to 4 bytes, so judging by string length would miss cases
   const bytes = Buffer.byteLength(password, 'utf8');
-  if (bytes < PASSWORD_MIN) return `密码至少 ${PASSWORD_MIN} 个字符`;
-  if (bytes > PASSWORD_MAX) return `密码过长(最多 ${PASSWORD_MAX} 字节)`;
+  if (bytes < PASSWORD_MIN) return `auth.passwordTooShort:${PASSWORD_MIN}`;
+  if (bytes > PASSWORD_MAX) return `auth.passwordTooLong:${PASSWORD_MAX}`;
   return null;
 }
 
@@ -73,12 +81,13 @@ router.post('/register', async (req, res) => {
 
 router.post('/login', async (req, res) => {
   const { email, password } = req.body || {};
-  // 登录只做类型/非空检查,不套用注册的强度规则 —— 规则收紧前注册的老用户
-  // 密码可能不满足新规则,拿新规则挡登录会把他们锁在门外。密码对不对由
-  // bcrypt.compare 说了算。
-  if (!email || !password) return res.status(400).json({ error: '请填写邮箱和密码' });
+  // Login only does type / non-empty checks and does not apply the registration strength rules —— the passwords
+  // of existing users who registered before the rules were tightened may not satisfy the new rules, and using
+  // those rules to block login would lock them out. Whether the password is correct is decided by
+  // bcrypt.compare.
+  if (!email || !password) return res.status(400).json({ error: 'auth.missingFields' });
   if (typeof email !== 'string' || typeof password !== 'string') {
-    return res.status(400).json({ error: '参数格式错误' });
+    return res.status(400).json({ error: 'auth.badParams' });
   }
   try {
     const { user, error } = await db.loginUser(email, password);
@@ -91,11 +100,11 @@ router.post('/login', async (req, res) => {
 
 router.get('/me', (req, res) => {
   const token = req.headers.authorization?.split(' ')[1];
-  if (!token) return res.status(401).json({ error: '未登录' });
+  if (!token) return res.status(401).json({ error: 'auth.notLoggedIn' });
   try {
     res.json({ user: jwt.verify(token, JWT_SECRET) });
   } catch {
-    res.status(401).json({ error: 'Token 无效' });
+    res.status(401).json({ error: 'auth.badToken' });
   }
 });
 

@@ -1,28 +1,28 @@
-// 狼人杀(Werewolf)—— 服务端权威游戏模块。
-// 角色:狼人 / 预言家 / 女巫 / 猎人 / 平民(神职按人数上场,见 godCountFor)。
+// Werewolf -- server-authoritative game module.
+// Roles: wolf / seer / witch / hunter / villager (gods come into play based on player count, see godCountFor).
 //
-// 实现平台统一游戏接口:
+// Implements the platform's shared game interface:
 //   createInitialState(players, config)
 //   applyAction(state, action, playerId) -> { state, events, error }
-//   serializeStateFor(state, playerId)   -> 分角色视图(狼见同伴、预言家见查验、女巫见刀口)
+//   serializeStateFor(state, playerId)   -> per-role view (wolves see teammates, seer sees checks, witch sees the kill target)
 //   isGameOver(state)                    -> { over, winner } | false
 //
-// 阶段状态机:
+// Phase state machine:
 //   lobby → reveal → night → [witch] → [hunter] → speech → day → [pk] → [hunter] → night → …
 //                                                                                    ↘ ended
-//   witch  仅在有存活女巫时插入(她要先看到刀口才能决定用不用解药)
-//   hunter 仅在猎人出局且可开枪时插入,结束后回 resumeTo 指定的阶段
-//   speech 轮流发言,一次只有一个人能说;说完才进 day 投票
-//   pk     白天平票且房主开了 tiePk 时插入
+//   witch  is inserted only when a living witch exists (she must see the kill target before deciding whether to use the healing potion)
+//   hunter is inserted only when the hunter is eliminated and can still shoot; afterwards it returns to the phase named by resumeTo
+//   speech takes turns, only one person may talk at a time; only after everyone has spoken does it move to the day vote
+//   pk     is inserted on a daytime tie when the host has enabled tiePk
 //
-// 所有阶段时长由房主配置(见 DEFAULTS / TIME_OPTIONS),不写死。
-// 到点一律由服务端 tick 兜底推进,避免有人掉线/发呆时死锁。
-// 纯逻辑,不碰 socket/db,便于测试(见 rules.test.js)。
+// All phase durations are configured by the host (see DEFAULTS / TIME_OPTIONS), never hardcoded.
+// When time runs out the server tick always advances things as a fallback, so nobody's disconnect or idling can deadlock the game.
+// Pure logic, touches neither socket nor db, which makes it easy to test (see rules.test.js).
 
 const ROLE = { WOLF: 'wolf', SEER: 'seer', WITCH: 'witch', HUNTER: 'hunter', VILLAGER: 'villager' };
 
-// 角色 → 阵营。屠边胜利按阵营判定(狼屠光"平民边"或"神职边"即胜)。
-// 新增角色只需在此登记阵营,checkWin 无需改动(避免在多处枚举具体角色)。
+// Role → faction. Side-wipe victories are decided by faction (wolves win by wiping out the "villager side" or the "god side").
+// A new role only needs its faction registered here, checkWin needs no change (this avoids enumerating concrete roles in several places).
 const FACTION = { wolf: 'wolf', god: 'god', villager: 'villager' };
 const ROLE_FACTION = {
   [ROLE.WOLF]: FACTION.wolf,
@@ -33,8 +33,8 @@ const ROLE_FACTION = {
 };
 const factionOf = (role) => ROLE_FACTION[role];
 
-// 神职上场顺序:人数越多神越多。小局保持轻快(只有预言家),
-// 中局加女巫,大局再加猎人。神职 ≥ 2 时屠神边规则自动恢复(见 checkWin)。
+// Order in which gods enter play: the more players, the more gods. Small games stay brisk (seer only),
+// medium games add the witch, large games add the hunter as well. Once there are >= 2 gods the god-side-wipe rule automatically comes back (see checkWin).
 const GOD_ORDER = [ROLE.SEER, ROLE.WITCH, ROLE.HUNTER];
 function godCountFor(n) {
   if (n >= 10) return 3;
@@ -42,23 +42,23 @@ function godCountFor(n) {
   return 1;
 }
 
-// 各阶段时长(秒)的默认值。到点由服务端计时器(tick)兜底推进,避免有人掉线/发呆时死锁。
-// 全部可由房主在大厅调整 —— 不同人群的节奏差别很大(线下玩家习惯长发言,
-// 线上玩家耐心短),写死一个值必然有一半人觉得难受。实际取值一律走 s.cfg,
-// 这里只是默认值和"没配置时"的兜底。
+// Default duration (in seconds) of each phase. When time runs out the server timer (tick) advances things as a fallback, so nobody's disconnect or idling can deadlock the game.
+// All of them can be adjusted by the host in the lobby -- the pacing different groups want varies a lot (offline players
+// are used to long speeches, online players have shorter patience), so any hardcoded value is bound to annoy half of them. Actual values always come from s.cfg,
+// these are only the defaults and the fallback for "not configured".
 const DEFAULTS = {
   tiePk: true,
-  revealSeconds: 30,   // 身份揭晓:等所有人点"进入游戏";此宽限超时只为防有人不点而卡住
-  nightSeconds: 40,    // 夜晚:狼人选刀 + 预言家查验
-  speechSeconds: 45,   // 单人发言时限;说完点"过"或超时自动轮下一个
-  daySeconds: 60,      // 投票阶段:可随时改票,到点结算
-  pkSeconds: 30,       // 平票 PK:平票者进入 PK,非平票的存活玩家重投一轮
-  witchSeconds: 25,    // 女巫用药:狼刀结算后单独一段(她要先看到刀口)
-  hunterSeconds: 20,   // 猎人开枪:出局后的即时反应,时间短
+  revealSeconds: 30,   // Role reveal: waits for everyone to click "enter game"; this grace timeout only exists so one person not clicking cannot stall the game
+  nightSeconds: 40,    // Night: wolves pick a kill target + seer checks
+  speechSeconds: 45,   // Time limit for a single player's speech; when done they click "pass", or it automatically moves to the next player on timeout
+  daySeconds: 60,      // Voting phase: votes can be changed at any time, resolved when time runs out
+  pkSeconds: 30,       // Tie PK: the tied players enter the PK, the other living players vote again in one more round
+  witchSeconds: 25,    // Witch potions: a separate segment after the wolf kill is resolved (she must see the kill target first)
+  hunterSeconds: 20,   // Hunter's shot: an immediate reaction after being eliminated, so the time is short
 };
 
-// 每项的可选值(前端渲染成一排按钮,同时也是服务端的白名单)。
-// 客户端可以伪造任意 config,所以取值必须在这里校验,不能只靠前端限制。
+// The allowed values for each item (the frontend renders them as a row of buttons, and they double as the server's whitelist).
+// The client can forge any config it likes, so the values have to be validated here and cannot rely on frontend restrictions alone.
 const TIME_OPTIONS = {
   revealSeconds: [15, 30, 45, 60],
   nightSeconds: [30, 40, 60, 90],
@@ -69,11 +69,11 @@ const TIME_OPTIONS = {
   hunterSeconds: [15, 20, 30, 45],
 };
 
-const DAY_HURRY_SECONDS = 5; // 白天全员投完后,把倒计时压到这么短 —— 留个改票窗口,不立即结算
-const CHAT_MAX = 300;        // 单条发言最大长度,防刷屏
+const DAY_HURRY_SECONDS = 5; // Once everyone has voted during the day, shorten the countdown to this -- it leaves a window for changing votes instead of resolving immediately
+const CHAT_MAX = 300;        // Maximum length of a single message, to prevent spam
 
-// 规整房主传入的配置:不在白名单里的值一律退回默认,防伪造的 config 把
-// 某个阶段设成 0 秒(瞬间跳过)或 99999 秒(卡死整局)。
+// Normalize the config passed in by the host: any value not in the whitelist falls back to the default, so that a forged config cannot
+// set a phase to 0 seconds (skipped instantly) or 99999 seconds (the whole game stuck).
 function normalizeConfig(cfg = {}) {
   const out = { tiePk: cfg.tiePk !== false };
   for (const [key, options] of Object.entries(TIME_OPTIONS)) {
@@ -84,7 +84,7 @@ function normalizeConfig(cfg = {}) {
 
 const now = () => Date.now();
 
-// 按人数决定狼人数量
+// Decide the number of wolves from the player count
 function wolfCount(n) {
   if (n >= 10) return 3;
   if (n >= 7) return 2;
@@ -100,7 +100,7 @@ function shuffle(arr) {
   return a;
 }
 
-// ── 创建初始状态 ──
+// ── Create the initial state ──
 function createInitialState(players, config = {}) {
   const ids = players.map((p) => p.id);
   const nWolf = wolfCount(ids.length);
@@ -114,27 +114,27 @@ function createInitialState(players, config = {}) {
   });
   return {
     phase: 'lobby',                       // lobby | reveal | night | day | pk | ended
-    cfg: normalizeConfig(config),   // 房主配置(阶段时长 + 平票 PK)
+    cfg: normalizeConfig(config),   // Host config (phase durations + tie PK)
     players: players.map((p) => ({ id: p.id, name: p.name })),
-    roles,                                // { playerId: role }(内部,不整体下发)
+    roles,                                // { playerId: role } (internal, never sent out as a whole)
     alive: Object.fromEntries(ids.map((id) => [id, true])),
-    absent: {},                           // 掉线/离开的玩家 { playerId: true };仍算存活但不参与推进判定
+    absent: {},                           // Disconnected/departed players { playerId: true }; still counted as alive but excluded from the advancement checks
     round: 0,
-    nightActions: {},                     // 本夜:{ wolfTargetVotes:{voterId:targetId}, seerCheck:{seerId,targetId} }
-    seerResults: {},                      // { seerId: { [targetId]: 'wolf'|'good' } } 累积查验结果
-    // 女巫:两瓶药全局各一次。潜规则"首夜可自救,之后不能",所以要记住用药的夜次。
+    nightActions: {},                     // Tonight: { wolfTargetVotes:{voterId:targetId}, seerCheck:{seerId,targetId} }
+    seerResults: {},                      // { seerId: { [targetId]: 'wolf'|'good' } } accumulated check results
+    // Witch: one use of each of the two potions for the whole game. The house rule is "self-heal allowed on the first night, not after", so we need to remember which night a potion was used.
     potions: { heal: true, poison: true },
-    // 猎人:开枪机会。被毒死不能开枪(标准规则),所以要区分死因,见 killPlayer。
+    // Hunter: the chance to shoot. Being poisoned to death means no shot (standard rule), so we have to distinguish causes of death, see killPlayer.
     hunterCanShoot: true,
-    pendingHunter: null,                  // 待开枪的猎人 id;非 hunter 阶段为 null
-    votes: {},                            // 白天投票:{ voterId: targetId|null }(可改票)
-    speechOrder: null,                    // 发言队列 [playerId];非 speech 阶段为 null
-    speechIndex: 0,                       // 当前轮到队列里的第几个
-    pkCandidates: null,                   // PK 加赛的候选人 [id,id];非 PK 阶段为 null
-    ready: {},                            // 身份揭晓:已点"进入游戏"的玩家 { playerId: true }
-    deadline: null,                       // 当前阶段截止时间戳(ms);到点由 tick 兜底推进
-    pausedRemainMs: null,                 // 全员掉线时挂起的剩余时长;重连后据此重设 deadline
-    log: [],                              // 公开事件日志
+    pendingHunter: null,                  // Id of the hunter waiting to shoot; null outside the hunter phase
+    votes: {},                            // Daytime vote: { voterId: targetId|null } (votes can be changed)
+    speechOrder: null,                    // Speaking queue [playerId]; null outside the speech phase
+    speechIndex: 0,                       // Which entry of the queue is speaking right now
+    pkCandidates: null,                   // Candidates in the PK runoff [id,id]; null outside the PK phase
+    ready: {},                            // Role reveal: players who have clicked "enter game" { playerId: true }
+    deadline: null,                       // Deadline timestamp (ms) of the current phase; tick advances things as a fallback when it passes
+    pausedRemainMs: null,                 // Remaining duration suspended when everyone is disconnected; used to reset the deadline after a reconnect
+    log: [],                              // Public event log
     lastNightVictim: null,
     lastVotedOut: null,
     winner: null,                         // 'wolf' | 'good'
@@ -144,27 +144,27 @@ function createInitialState(players, config = {}) {
 
 const aliveIds = (s) => s.players.map((p) => p.id).filter((id) => s.alive[id]);
 const aliveWolves = (s) => aliveIds(s).filter((id) => s.roles[id] === ROLE.WOLF);
-// 在场 = 存活且未掉线。只用于"还要等谁行动"的推进判定;
-// 胜负判定一律用 aliveIds —— 掉线不等于出局,否则退game即可送对面赢。
+// Present = alive and not disconnected. Used only for the "who are we still waiting on" advancement checks;
+// win conditions always use aliveIds -- a disconnect is not an elimination, otherwise quitting the game would simply hand the win to the other side.
 const presentIds = (s) => aliveIds(s).filter((id) => !s.absent[id]);
-// 某阵营开局是否存在,以及是否已被全屠(存活为 0)。屠边只对开局存在的阵营成立,
-// 避免小局某边人数为 0 时开局即判狼胜。
+// Whether a faction existed at the start of the game, and whether it has been wiped out entirely (0 alive). A side wipe only counts for factions that existed at the start,
+// which avoids declaring an instant wolf win in a small game where one side has 0 members.
 const factionExists = (s, f) => Object.values(s.roles).some((r) => factionOf(r) === f);
 const factionWiped = (s, f) =>
   factionExists(s, f) && !aliveIds(s).some((id) => factionOf(s.roles[id]) === f);
 
-// 每边至少要有几个神职,"屠神边"才算一个有意义的胜利条件。
-// 只有 1 个神(当前板子只有预言家)时屠神边会退化成"第一晚刀中某个特定的人就赢":
-// 实测狼盲刀的情况下,6 人局 20%、8 人局 17% 的对局在第一个白天开始前就结束,
-// 其他人一句话没说、一票没投。等以后加了女巫/猎人(FACTION.god 有 2 个以上成员),
-// 屠神边自动重新生效,不需要再改这里。
+// How many gods a side must have at minimum before "wipe out the god side" is a meaningful win condition.
+// With only 1 god (the current setup has just the seer) the god-side wipe degenerates into "kill one specific person on the first night and win":
+// measured with wolves killing blind, 20% of 6-player games and 17% of 8-player games end before the first day even begins,
+// with nobody else having said a word or cast a vote. Once the witch/hunter are added later (FACTION.god having more than 2 members),
+// the god-side wipe automatically takes effect again with no further change needed here.
 const MIN_GODS_FOR_WIPE_RULE = 2;
 
-// 检查胜负;有结果则置 ended。
-//   好人胜 —— 狼人全部出局。
-//   狼人胜 —— 屠平民边;或屠神边(仅在神职足够多时);或狼人数 ≥ 好人数(狼可以强行
-//             票死任何人,已成定局,继续玩下去只是走流程)。
-// 阵营由 ROLE_FACTION 推导,加新角色无需改这里。
+// Check the win conditions; if there is a result, set the phase to ended.
+//   Good wins -- all wolves are eliminated.
+//   Wolves win -- the villager side is wiped out; or the god side is wiped out (only when there are enough gods); or the number of wolves >= the number of good players (the wolves can
+//                 force-vote anybody out, so the outcome is settled and playing on would just be going through the motions).
+// Factions are derived from ROLE_FACTION, so adding a new role needs no change here.
 function checkWin(s) {
   if (aliveWolves(s).length === 0) { s.winner = 'good'; s.phase = 'ended'; return true; }
 
@@ -182,9 +182,9 @@ function checkWin(s) {
   return false;
 }
 
-// 进入身份揭晓(不计时,等所有存活玩家点"进入游戏";带宽限超时防有人不点卡住)
-// 设置当前阶段截止时间。进入新阶段一律走这里,顺手清掉挂起的剩余时长 ——
-// 否则"挂起期间发生阶段切换"会留下过期的 pausedRemainMs,重连时把新阶段的表改错。
+// Enter the role reveal (untimed, waits for every living player to click "enter game"; carries a grace timeout so one person not clicking cannot stall it)
+// Set the deadline of the current phase. Every entry into a new phase goes through here, and it clears any suspended remaining duration along the way --
+// otherwise a "phase change during a suspension" would leave a stale pausedRemainMs behind, which would set the new phase's clock wrong on reconnect.
 function setDeadline(s, seconds) {
   s.deadline = now() + seconds * 1000;
   s.pausedRemainMs = null;
@@ -196,7 +196,7 @@ function enterReveal(s) {
   setDeadline(s, s.cfg.revealSeconds);
 }
 
-// 进入夜晚
+// Enter the night
 function enterNight(s) {
   s.round += 1;
   s.phase = 'night';
@@ -205,21 +205,21 @@ function enterNight(s) {
   s.log.push({ type: 'phase', phase: 'night', round: s.round });
 }
 
-// 女巫要"看到刀口"才能决定救不救,所以夜晚必须分两段:
-// 先结算狼刀定下 victim,再单独给女巫一段时间用药。没有女巫时这一段直接跳过。
+// The witch has to "see the kill target" before she can decide whether to save them, so the night must be split into two segments:
+// first resolve the wolf kill to settle the victim, then give the witch a separate stretch of time to use her potions. When there is no witch this segment is skipped entirely.
 function enterWitchTurn(s) {
   s.phase = 'witch';
   setDeadline(s, s.cfg.witchSeconds);
 }
 
-// 统一的死亡入口。所有让人出局的路径都走这里,好处是猎人的触发只写一次 ——
-// 漏掉任何一条路径,就会出现"某种死法猎人不开枪"的诡异 bug。
+// The single entry point for death. Every path that eliminates someone goes through here, and the benefit is that the hunter trigger is written only once --
+// missing any one path would produce the bizarre bug of "the hunter doesn't shoot when killed in a particular way".
 // cause: 'wolf' | 'vote' | 'poison' | 'shot' | 'leave'
-// 返回是否触发了猎人开枪(调用方据此决定要不要停下来等他)。
+// Returns whether the hunter's shot was triggered (the caller uses this to decide whether to stop and wait for him).
 function killPlayer(s, id, cause) {
   if (!id || !s.alive[id]) return false;
   s.alive[id] = false;
-  // 猎人被毒死不能开枪(标准规则:毒药让他来不及反应)。其余死法都能。
+  // A hunter poisoned to death cannot shoot (standard rule: the poison leaves him no time to react). Every other cause of death allows it.
   if (s.roles[id] === ROLE.HUNTER && s.hunterCanShoot && cause !== 'poison') {
     s.pendingHunter = id;
     return true;
@@ -227,26 +227,26 @@ function killPlayer(s, id, cause) {
   return false;
 }
 
-// 进入猎人开枪阶段。这是唯一会打断正常昼夜流转的阶段,结束后由 resumeAfterHunter
-// 回到本来该去的地方。
+// Enter the hunter's shooting phase. This is the only phase that interrupts the normal day/night cycle; afterwards resumeAfterHunter
+// returns to wherever the game was supposed to go.
 function enterHunterTurn(s) {
   s.phase = 'hunter';
   setDeadline(s, s.cfg.hunterSeconds);
   s.log.push({ type: 'hunter_turn', playerId: s.pendingHunter });
 }
 
-// 进入白天发言:按座位轮流,一次只有一个人能说,其余人只能看。
+// Enter the daytime speeches: players take turns by seat, only one person may talk at a time, everyone else can only watch.
 //
-// 这是狼人杀的核心机制,不是锦上添花 —— 悍跳、对跳、聊爆狼全建立在"轮流发言"上。
-// 允许同时刷屏的话,狼只要疯狂刷屏就能把预言家的报点冲走,变成谁打字快谁赢。
+// This is a core mechanic of Werewolf, not a nice-to-have -- fake claims, counter-claims and talking a wolf into the ground all rest on "taking turns to speak".
+// If simultaneous spamming were allowed, a wolf could just spam furiously to bury the seer's report, and it would become a contest of who types fastest.
 //
-// 顺序从"上一个死者的下一位"开始(线下惯例:死者下家先发言),死者不在队列里。
-// 全部说完 → 进投票。
+// The order starts from "the player after the last person who died" (the offline convention: the player after the dead one speaks first), and the dead are not in the queue.
+// Once everyone has spoken → move to the vote.
 function enterSpeech(s) {
   const order = aliveIds(s);
   if (!order.length) { enterDay(s); return; }
 
-  // 起点:上一个出局者在原始座位里的下一位;没有死者(首日)就从 0 开始
+  // Starting point: the player after the last eliminated one in the original seating; with no dead player (the first day) start from 0
   const seats = s.players.map((p) => p.id);
   const lastDead = Array.isArray(s.lastNightVictim) ? s.lastNightVictim[0] : s.lastNightVictim;
   let start = 0;
@@ -267,8 +267,8 @@ function enterSpeech(s) {
   s.log.push({ type: 'phase', phase: 'speech', round: s.round, order: s.speechOrder });
 }
 
-// 轮到下一位发言;都说完了就进投票。
-// 掉线/已出局的人自动跳过 —— 否则全场要为一个不会说话的人干等满 45 秒。
+// Move on to the next speaker; once everyone has spoken, go to the vote.
+// Disconnected/eliminated players are skipped automatically -- otherwise the whole table would sit through a full 45 seconds for somebody who cannot talk.
 function nextSpeaker(s) {
   for (let i = s.speechIndex + 1; i < s.speechOrder.length; i++) {
     const id = s.speechOrder[i];
@@ -284,8 +284,8 @@ function nextSpeaker(s) {
 const currentSpeaker = (s) =>
   s.phase === 'speech' ? ((s.speechOrder || [])[s.speechIndex] ?? null) : null;
 
-// 进入投票阶段:发言已经结束,这里只投票。
-// 玩家可在时间内随时改票;到点(tick)或全员投完即结算。
+// Enter the voting phase: the speeches are over, this phase is only for voting.
+// Players can change their vote at any time within the time limit; it resolves when time runs out (tick) or once everyone has voted.
 function enterDay(s) {
   s.phase = 'day';
   s.votes = {};
@@ -295,8 +295,8 @@ function enterDay(s) {
   s.log.push({ type: 'phase', phase: 'day', round: s.round });
 }
 
-// 夜晚第一段:定下狼刀的目标(还没真死 —— 女巫可能救)。
-// 有存活女巫就进 witch 阶段让她决定;否则直接结算。
+// First segment of the night: settle the wolves' kill target (nobody has actually died yet -- the witch may save them).
+// If there is a living witch, enter the witch phase and let her decide; otherwise resolve right away.
 function resolveNight(s) {
   const votes = s.nightActions.wolfTargetVotes || {};
   const tally = {};
@@ -312,8 +312,8 @@ function resolveNight(s) {
   finishNight(s);
 }
 
-// 夜晚第二段:把狼刀 + 女巫用药的结果一并结算。
-// 救人只是取消狼刀,不是"复活",所以顺序上先看 heal 再落死亡。
+// Second segment of the night: resolve the wolf kill and the witch's potion use together.
+// Saving someone merely cancels the wolf kill, it is not a "resurrection", so the order is to check heal first and only then apply the deaths.
 function finishNight(s) {
   const w = s.nightActions.witch || {};
   const victim = s.nightActions.victim;
@@ -332,13 +332,13 @@ function finishNight(s) {
   s.nightActions.victim = null;
 
   if (checkWin(s)) return;
-  // 猎人被刀时先让他开枪,再进白天发言
+  // When the hunter is the one killed, let him shoot first and only then move on to the daytime speeches
   if (hunterTriggered) { s.resumeTo = 'day'; enterHunterTurn(s); return; }
   enterSpeech(s);
 }
 
-// 数票:返回得票最高者。max 为最高票数,leaders 为并列最高的所有人(可能 1 个或多个)。
-// 弃票(null)不计入。无人投票时 leaders 为空。
+// Count the votes: returns whoever got the most votes. max is the highest vote count, leaders is everyone tied at that highest count (possibly 1 or several).
+// Abstentions (null) do not count. When nobody voted, leaders is empty.
 function tallyVotes(votes) {
   const tally = {};
   Object.values(votes).forEach((t) => { if (t) tally[t] = (tally[t] || 0) + 1; });
@@ -348,40 +348,40 @@ function tallyVotes(votes) {
   return { tally, max, leaders };
 }
 
-// 放逐一名玩家并记日志、判胜负、进下一夜。out 为 null 表示无人出局。
+// Exile a player, write the log, check the win conditions, and move on to the next night. out being null means nobody is eliminated.
 function exileAndAdvance(s, out) {
   const hunterTriggered = out && s.alive[out] ? killPlayer(s, out, 'vote') : false;
   s.lastVotedOut = out && !s.alive[out] ? out : null;
   s.log.push({ type: 'vote_result', out: s.lastVotedOut });
   if (checkWin(s)) return;
-  // 被票出的猎人可以开枪带走一个,再进夜晚
+  // A hunter who is voted out gets to shoot and take somebody with him before the night begins
   if (hunterTriggered) { s.resumeTo = 'night'; enterHunterTurn(s); return; }
   enterNight(s);
 }
 
-// 猎人开枪结束(开了或放弃/超时)→ 回到本来该去的阶段。
+// The hunter's shot is over (taken, declined or timed out) → return to the phase the game was supposed to go to.
 function resumeAfterHunter(s) {
   const to = s.resumeTo === 'night' ? 'night' : 'day';
   s.pendingHunter = null;
   s.resumeTo = null;
   if (checkWin(s)) return;
-  // 回白天时要回到"发言"而不是直接投票 —— 猎人的枪响本身就是重要信息,
-  // 大家需要在发言里消化它。
+  // When returning to the day it has to be the "speech" phase rather than the vote directly -- the gunshot itself is important information,
+  // and everyone needs the speeches to digest it.
   if (to === 'night') enterNight(s); else enterSpeech(s);
 }
 
-// 结算白天投票:
-//   唯一最高票 → 放逐;
-//   平票 → 开了 tiePk 且是首轮投票(非 PK 阶段) → 进 PK 加赛;否则无人出局。
+// Resolve the daytime vote:
+//   a single highest vote count → exile;
+//   a tie → if tiePk is enabled and this is the first round of voting (not the PK phase) → go to the PK runoff; otherwise nobody is eliminated.
 function resolveVote(s) {
   const { max, leaders } = tallyVotes(s.votes);
   if (leaders.length === 1 && max > 0) { exileAndAdvance(s, leaders[0]); return; }
-  // 平票或无人投票。首轮平票且开启 PK 且有 ≥2 个平票者 → 进 PK
+  // A tie or nobody voted. A first-round tie with PK enabled and >= 2 tied players → go to the PK
   if (s.cfg.tiePk && leaders.length >= 2) { enterPk(s, leaders); return; }
-  exileAndAdvance(s, null); // 无票 / 关闭PK的平票 → 无人出局
+  exileAndAdvance(s, null); // No votes / a tie with PK disabled → nobody is eliminated
 }
 
-// 进入 PK 加赛:平票者成为候选,其余存活玩家重投一轮(候选人不投)。
+// Enter the PK runoff: the tied players become the candidates, and the remaining living players vote again in one more round (candidates do not vote).
 function enterPk(s, candidates) {
   s.phase = 'pk';
   s.pkCandidates = candidates;
@@ -390,64 +390,64 @@ function enterPk(s, candidates) {
   s.log.push({ type: 'phase', phase: 'pk', round: s.round, candidates });
 }
 
-// 结算 PK 投票:唯一最高票放逐;再平票 → 无人出局(不无限 PK)。
+// Resolve the PK vote: a single highest vote count gets exiled; another tie → nobody is eliminated (no endless PK).
 function resolvePk(s) {
   const { max, leaders } = tallyVotes(s.votes);
   s.pkCandidates = null;
   exileAndAdvance(s, leaders.length === 1 && max > 0 ? leaders[0] : null);
 }
 
-// ── 应用动作 ──
-// { type:'start' }                房主开始
-// { type:'wolf_kill', target }    狼人投票杀人(夜晚)
-// { type:'seer_check', target }   预言家查验(夜晚)
-// { type:'vote', target }         白天投票(target 可为 null 弃票)
+// ── Apply an action ──
+// { type:'start' }                the host starts the game
+// { type:'wolf_kill', target }    wolves vote to kill somebody (night)
+// { type:'seer_check', target }   the seer checks somebody (night)
+// { type:'vote', target }         daytime vote (target may be null to abstain)
 function applyAction(s, action, playerId) {
   const events = [];
   const isAlive = s.alive[playerId];
 
-  // 观战者(及任何不在本局里的 id)不能行动。tick 由服务端驱动,playerId 为 null。
-  // 发言这一条尤其重要:观战者不在 alive 表里,会被当成死人路由进死人频道,
-  // 于是开了上帝视角的观战者可以把看到的身份直接播给所有死者。
+  // Spectators (and any id not in this game) cannot act. tick is driven by the server, with playerId being null.
+  // The speech case matters most here: a spectator is not in the alive table, so they would be treated as a dead player and routed into the dead channel,
+  // meaning a spectator with the god view turned on could broadcast every role they can see straight to all the dead players.
   if (action.type !== 'tick' && !(playerId in s.alive)) {
-    return { error: '你不是本局玩家' };
+    return { error: 'game.notAPlayer' };
   }
 
   switch (action.type) {
     case 'start': {
-      if (playerId !== s.hostId) return { error: '只有房主能开始' };
-      if (s.phase !== 'lobby') return { error: '游戏已开始' };
-      if (s.players.length < 4) return { error: '狼人杀至少需要 4 人' };
-      enterReveal(s);   // 先进身份揭晓,等所有人点"进入游戏"再进夜晚(夜晚才起计时)
+      if (playerId !== s.hostId) return { error: 'room.hostOnlyStart' };
+      if (s.phase !== 'lobby') return { error: 'room.alreadyStarted' };
+      if (s.players.length < 4) return { error: 'wolf.needFour' };
+      enterReveal(s);   // Go to the role reveal first and wait for everyone to click "enter game" before the night begins (the clock only starts at night)
       return { state: s, events };
     }
 
-    // 身份揭晓:玩家点"进入游戏"表示已看完身份。所有存活玩家就绪(或宽限超时)→ 进夜晚。
+    // Role reveal: a player clicking "enter game" means they have finished looking at their role. Once every living player is ready (or the grace timeout fires) → go to the night.
     case 'ready': {
-      if (s.phase !== 'reveal') return { state: s, events }; // 幂等:非揭晓阶段忽略
+      if (s.phase !== 'reveal') return { state: s, events }; // Idempotent: ignored outside the reveal phase
       s.ready[playerId] = true;
       if (presentIds(s).every((id) => s.ready[id])) enterNight(s);
       return { state: s, events };
     }
 
     case 'wolf_kill': {
-      if (s.phase !== 'night') return { error: '非夜晚阶段' };
-      if (!isAlive || s.roles[playerId] !== ROLE.WOLF) return { error: '只有存活狼人能行动' };
-      if (!s.alive[action.target]) return { error: '目标无效' };
+      if (s.phase !== 'night') return { error: 'wolf.notNight' };
+      if (!isAlive || s.roles[playerId] !== ROLE.WOLF) return { error: 'wolf.onlyLiveWolf' };
+      if (!s.alive[action.target]) return { error: 'game.badTarget' };
       s.nightActions.wolfTargetVotes[playerId] = action.target;
-      // 所有存活狼人都投了 + 预言家查验完(若有存活预言家)→ 结算夜晚
+      // Every living wolf has voted + the seer has finished checking (if there is a living seer) → resolve the night
       maybeResolveNight(s);
       return { state: s, events };
     }
 
     case 'seer_check': {
-      if (s.phase !== 'night') return { error: '非夜晚阶段' };
-      if (!isAlive || s.roles[playerId] !== ROLE.SEER) return { error: '只有预言家能查验' };
-      // 每夜只能查一个。seerResults 是跨夜累积的,不像狼人的 wolfTargetVotes 那样
-      // 按玩家 id 覆盖 —— 少了这道门禁,预言家一夜就能把全场查穿,天亮直接报完狼坑。
-      if (s.nightActions.seerCheck) return { error: '今晚已经查验过了' };
-      if (!s.alive[action.target]) return { error: '目标无效' };
-      if (action.target === playerId) return { error: '不能查验自己' };
+      if (s.phase !== 'night') return { error: 'wolf.notNight' };
+      if (!isAlive || s.roles[playerId] !== ROLE.SEER) return { error: 'wolf.onlySeer' };
+      // Only one check per night. seerResults accumulates across nights, so unlike the wolves' wolfTargetVotes it is not
+      // overwritten per player id -- without this gate the seer could check the entire table in a single night and read out every wolf at dawn.
+      if (s.nightActions.seerCheck) return { error: 'wolf.alreadyChecked' };
+      if (!s.alive[action.target]) return { error: 'game.badTarget' };
+      if (action.target === playerId) return { error: 'wolf.noCheckSelf' };
       const result = s.roles[action.target] === ROLE.WOLF ? 'wolf' : 'good';
       s.seerResults[playerId] = s.seerResults[playerId] || {};
       s.seerResults[playerId][action.target] = result;
@@ -456,53 +456,53 @@ function applyAction(s, action, playerId) {
       return { state: s, events };
     }
 
-    // 女巫用药。{ heal: true } 救刀口 / { poison: targetId } 毒一个 / 两者皆无 = 跳过。
-    // 同一夜只能用一瓶(标准规则),药用完不可再用。
+    // The witch uses a potion. { heal: true } saves the kill target / { poison: targetId } poisons somebody / neither = skip.
+    // Only one potion per night (standard rule), and a potion that has been used up cannot be used again.
     case 'witch': {
-      if (s.phase !== 'witch') return { error: '非女巫行动阶段' };
-      if (!isAlive || s.roles[playerId] !== ROLE.WITCH) return { error: '只有存活女巫能用药' };
-      if (s.nightActions.witch) return { error: '今晚已经行动过了' };
+      if (s.phase !== 'witch') return { error: 'wolf.notWitchPhase' };
+      if (!isAlive || s.roles[playerId] !== ROLE.WITCH) return { error: 'wolf.onlyLiveWitch' };
+      if (s.nightActions.witch) return { error: 'wolf.alreadyActed' };
 
       const { heal, poison } = action;
-      if (heal && poison) return { error: '同一夜只能用一瓶药' };
+      if (heal && poison) return { error: 'wolf.onePotionPerNight' };
 
       if (heal) {
-        if (!s.potions.heal) return { error: '解药已经用过了' };
-        if (!s.nightActions.victim) return { error: '今晚没有人被刀' };
-        // 首夜可以自救,之后不行 —— 否则女巫近乎无敌
-        if (s.nightActions.victim === playerId && s.round > 1) return { error: '不能自救' };
+        if (!s.potions.heal) return { error: 'wolf.healUsed' };
+        if (!s.nightActions.victim) return { error: 'wolf.noVictimTonight' };
+        // Self-healing is allowed on the first night but not afterwards -- otherwise the witch would be nearly invincible
+        if (s.nightActions.victim === playerId && s.round > 1) return { error: 'wolf.noSelfHeal' };
         s.potions.heal = false;
         s.nightActions.witch = { heal: true };
       } else if (poison) {
-        if (!s.potions.poison) return { error: '毒药已经用过了' };
-        if (!s.alive[poison]) return { error: '目标无效' };
-        if (poison === playerId) return { error: '不能毒自己' };
+        if (!s.potions.poison) return { error: 'wolf.poisonUsed' };
+        if (!s.alive[poison]) return { error: 'game.badTarget' };
+        if (poison === playerId) return { error: 'wolf.noPoisonSelf' };
         s.potions.poison = false;
         s.nightActions.witch = { poison };
       } else {
-        s.nightActions.witch = {};   // 明确跳过
+        s.nightActions.witch = {};   // An explicit skip
       }
       finishNight(s);
       return { state: s, events };
     }
 
-    // 结束自己的发言("过")。只有当前发言人能过,防止别人替他跳过。
+    // End your own speech ("pass"). Only the current speaker can pass, which stops somebody else from skipping them.
     case 'pass_speech': {
-      if (s.phase !== 'speech') return { error: '非发言阶段' };
-      if (playerId !== currentSpeaker(s)) return { error: '现在不是你发言' };
+      if (s.phase !== 'speech') return { error: 'wolf.notSpeechPhase' };
+      if (playerId !== currentSpeaker(s)) return { error: 'wolf.notSpeakingNow' };
       nextSpeaker(s);
       return { state: s, events };
     }
 
-    // 猎人开枪:出局瞬间带走一名存活玩家。target 为 null 表示放弃。
+    // The hunter's shot: the moment he is eliminated he takes a living player with him. target being null means he declines.
     case 'hunter_shoot': {
-      if (s.phase !== 'hunter') return { error: '非猎人开枪阶段' };
-      if (playerId !== s.pendingHunter) return { error: '不是你开枪' };
+      if (s.phase !== 'hunter') return { error: 'wolf.notHunterPhase' };
+      if (playerId !== s.pendingHunter) return { error: 'wolf.notYourShot' };
       s.hunterCanShoot = false;
       const target = action.target;
       if (target) {
-        if (!s.alive[target]) return { error: '目标无效' };
-        killPlayer(s, target, 'shot');   // 被猎人打死的若也是猎人,已用过枪不会再触发
+        if (!s.alive[target]) return { error: 'game.badTarget' };
+        killPlayer(s, target, 'shot');   // If the person shot by the hunter is himself a hunter, the shot is already spent so it will not trigger again
         s.log.push({ type: 'hunter_shot', playerId, target });
       } else {
         s.log.push({ type: 'hunter_shot', playerId, target: null });
@@ -511,42 +511,42 @@ function applyAction(s, action, playerId) {
       return { state: s, events };
     }
 
-    // 白天投票(讨论与投票同阶段):时间内可随时改票,target 为 null 即弃票。
-    // 到倒计时结束才结算(见 tick),不提前结算 —— 保证承诺的"时间内可改票"始终成立。
+    // Daytime vote (discussion and voting share the phase): votes can be changed at any time within the time limit, target being null is an abstention.
+    // It only resolves when the countdown ends (see tick), never early -- this keeps the promise that "votes can be changed within the time limit" always true.
     case 'vote': {
-      if (s.phase !== 'day') return { error: '非白天投票阶段' };
-      if (!isAlive) return { error: '死亡玩家不能投票' };
-      if (action.target && !s.alive[action.target]) return { error: '目标无效' };
+      if (s.phase !== 'day') return { error: 'wolf.notDayVote' };
+      if (!isAlive) return { error: 'wolf.deadCannotVote' };
+      if (action.target && !s.alive[action.target]) return { error: 'game.badTarget' };
       s.votes[playerId] = action.target || null;
-      hurryDayIfAllVoted(s);   // 全员投完 → 把倒计时压到 DAY_HURRY_SECONDS(仍可改票)
+      hurryDayIfAllVoted(s);   // Everyone has voted → shorten the countdown to DAY_HURRY_SECONDS (votes can still be changed)
       return { state: s, events };
     }
 
-    // PK 加赛投票:只有非候选的存活玩家能投,且只能投候选人之一(或弃票)。
+    // PK runoff vote: only living non-candidates can vote, and they can only vote for one of the candidates (or abstain).
     case 'pk_vote': {
-      if (s.phase !== 'pk') return { error: '非 PK 阶段' };
-      if (!isAlive) return { error: '死亡玩家不能投票' };
-      if (s.pkCandidates.includes(playerId)) return { error: 'PK 候选人不参与投票' };
-      if (action.target && !s.pkCandidates.includes(action.target)) return { error: '只能投 PK 候选人' };
+      if (s.phase !== 'pk') return { error: 'wolf.notPkPhase' };
+      if (!isAlive) return { error: 'wolf.deadCannotVote' };
+      if (s.pkCandidates.includes(playerId)) return { error: 'wolf.pkCandidateCannotVote' };
+      if (action.target && !s.pkCandidates.includes(action.target)) return { error: 'wolf.pkCandidatesOnly' };
       s.votes[playerId] = action.target || null;
-      hurryDayIfAllVoted(s);   // 全员(非候选存活者)投完 → 压缩倒计时
+      hurryDayIfAllVoted(s);   // Everyone (the living non-candidates) has voted → shorten the countdown
       return { state: s, events };
     }
 
-    // 发言(讨论用)。白天/PK 阶段:存活者发到公开频道(死者/观战者也可见);
-    // 死亡玩家:任何非结束阶段都可发,但只进"死人频道"(仅死者+观战者可见,防剧透)。
-    // 夜晚存活者不能公开发言(天黑闭眼)。频道路由在传输层(server.js)按 channel 分发。
+    // Chat (used for discussion). During the day/PK phases: living players post to the public channel (the dead/spectators can see it too);
+    // dead players: they can post during any non-ended phase, but only into the "dead channel" (visible only to the dead + spectators, to prevent spoilers).
+    // Living players cannot speak publicly at night (eyes closed in the dark). Channel routing happens in the transport layer (server.js) based on the channel field.
     case 'chat': {
-      if (s.phase === 'ended' || s.phase === 'lobby') return { error: '当前不能发言' };
+      if (s.phase === 'ended' || s.phase === 'lobby') return { error: 'wolf.cannotSpeak' };
       const text = String(action.text || '').trim().slice(0, CHAT_MAX);
       if (!text) return { state: s, events };
       if (isAlive) {
-        // 发言阶段:只有当前发言人能说。这是整个机制的关键 ——
-        // 少了这道校验,狼就能在别人发言时刷屏把报点冲走。
+        // The speech phase: only the current speaker may talk. This is the crux of the whole mechanic --
+        // without this check a wolf could spam during someone else's speech and bury their report.
         if (s.phase === 'speech') {
-          if (playerId !== currentSpeaker(s)) return { error: '还没轮到你发言' };
+          if (playerId !== currentSpeaker(s)) return { error: 'wolf.notYourSpeech' };
         } else if (s.phase !== 'day' && s.phase !== 'pk') {
-          return { error: '现在还不能公开发言' };
+          return { error: 'wolf.cannotSpeakPublic' };
         }
         events.push({ type: 'chat', channel: 'alive', playerId, text });
       } else {
@@ -555,124 +555,124 @@ function applyAction(s, action, playerId) {
       return { state: s, events };
     }
 
-    // 服务端计时器驱动:当前阶段到点则兜底推进(避免掉线/发呆导致死锁)
+    // Driven by the server timer: when the current phase's time is up, advance it as a fallback (so a disconnect or idling cannot deadlock the game)
     case 'tick': {
       if (s.phase === 'ended' || !s.deadline || now() < s.deadline) return { state: s, events };
       if (s.phase === 'reveal') {
-        // 宽限超时:仍有人没点"进入游戏",也强制进夜晚,防止卡在揭晓
+        // Grace timeout: even with people who still have not clicked "enter game", force the move to the night so it cannot get stuck on the reveal
         enterNight(s);
       } else if (s.phase === 'night') {
-        // 未行动的狼人 → 空刀(不补随机目标,平安夜);预言家未查 → 跳过
+        // Wolves who did not act → no kill (no random target is filled in, it is a peaceful night); a seer who did not check → skipped
         resolveNight(s);
       } else if (s.phase === 'witch') {
-        // 女巫没在时限内用药 → 视为跳过,按原刀口结算
+        // The witch did not use a potion within the time limit → treated as a skip, resolve with the original kill target
         s.nightActions.witch = s.nightActions.witch || {};
         finishNight(s);
       } else if (s.phase === 'hunter') {
-        // 猎人没开枪 → 视为放弃
+        // The hunter did not shoot → treated as declining
         s.hunterCanShoot = false;
         resumeAfterHunter(s);
       } else if (s.phase === 'speech') {
-        // 发言超时 → 自动轮到下一位(线下也是这样,时间到就换人)
+        // Speech timed out → automatically move on to the next player (offline works the same way, when time is up it is somebody else's turn)
         nextSpeaker(s);
       } else if (s.phase === 'day') {
-        // 到点结算:未投的算弃票,平票视配置进 PK 或无人出局
+        // Resolve when time is up: anyone who did not vote counts as abstaining, and a tie either goes to the PK or eliminates nobody depending on the config
         resolveVote(s);
       } else if (s.phase === 'pk') {
-        // PK 到点结算:再平票无人出局
+        // Resolve the PK when time is up: another tie eliminates nobody
         resolvePk(s);
       }
       return { state: s, events };
     }
 
     default:
-      return { error: '未知动作' };
+      return { error: 'game.unknownAction' };
   }
 }
 
-// 该阶段哪些在场存活玩家"应当投票"。白天=全部;PK=非候选者(候选人不投自己那轮)。
+// Which present living players "are supposed to vote" in this phase. Day = everybody; PK = the non-candidates (candidates do not vote in their own round).
 function expectedVoters(s) {
   const voters = presentIds(s);
   if (s.phase === 'pk') return voters.filter((id) => !s.pkCandidates.includes(id));
   return voters;
 }
 
-// 全员投完 → 把 deadline 压到 DAY_HURRY_SECONDS 后(只缩短,不延长)。
-// "全员"= 该阶段应投票的在场存活玩家都有票记录(弃票 null 也算已投);掉线者不阻塞,
-// 与 maybeResolveNight 用 presentIds 保持一致。压缩后仍可改票,到点由 tick 结算。
+// Everyone has voted → move the deadline to DAY_HURRY_SECONDS from now (only shortening it, never extending it).
+// "Everyone" = every present living player who is supposed to vote in this phase has a vote recorded (an abstention of null counts as having voted); disconnected players do not block it,
+// which keeps this consistent with maybeResolveNight using presentIds. Votes can still be changed after the shortening, and tick resolves it when time is up.
 function hurryDayIfAllVoted(s) {
   if ((s.phase !== 'day' && s.phase !== 'pk') || s.deadline == null) return;
   const voters = expectedVoters(s);
-  if (voters.length === 0) return;                        // 没人能投票,不处理
-  if (!voters.every((id) => id in s.votes)) return;       // 还有人没投
+  if (voters.length === 0) return;                        // Nobody can vote, so do nothing
+  if (!voters.every((id) => id in s.votes)) return;       // Somebody still has not voted
   const hurryUntil = now() + DAY_HURRY_SECONDS * 1000;
-  if (hurryUntil < s.deadline) s.deadline = hurryUntil;   // 只往前提,不回退
+  if (hurryUntil < s.deadline) s.deadline = hurryUntil;   // Only move it earlier, never back
 }
 
-// 夜晚是否可结算:所有存活狼人已投 + (无存活预言家 或 预言家已查验)
-// 只等"在场"的狼/预言家;掉线者不阻塞提前结算(到点仍有 tick 兜底)。
+// Whether the night can be resolved: every living wolf has voted + (there is no living seer, or the seer has checked)
+// Only "present" wolves/seers are waited on; disconnected players do not block an early resolution (tick is still the fallback when time is up).
 function maybeResolveNight(s) {
   const wolves = presentIds(s).filter((id) => s.roles[id] === ROLE.WOLF);
   const wolvesDone = wolves.every((id) => id in s.nightActions.wolfTargetVotes);
   const seers = presentIds(s).filter((id) => s.roles[id] === ROLE.SEER);
   const seerDone = seers.length === 0 || s.nightActions.seerCheck != null;
-  // 狼全掉线时 wolves 为空,every 恒真 —— 不能就地空刀结算,交给 tick 到点处理,
-  // 否则夜晚会在掉线瞬间被秒结算。
+  // When every wolf is disconnected, wolves is empty and every is trivially true -- we must not resolve a no-kill night right here, leave it to tick when time is up,
+  // otherwise the night would be resolved instantly the moment they disconnect.
   if (wolves.length === 0) return;
   if (wolvesDone && seerDone) resolveNight(s);
 }
 
-// ── 掉线/重连 ──
-// 掉线只标记"不在场",不判出局:退game不应把胜利送给对面。
-// 影响的只是"还要等谁行动",胜负仍按 alive 计算。
+// ── Disconnect/reconnect ──
+// A disconnect only marks the player as "not present", it never eliminates them: quitting the game should not hand the win to the other side.
+// All it affects is "who are we still waiting on"; the win conditions are still computed from alive.
 function removePlayer(s, playerId) {
   if (!s || !(playerId in s.alive)) return;
   s.absent[playerId] = true;
   if (s.phase === 'ended') return;
 
-  // 注意:这里不碰 deadline。"该不该停表"取决于还有没有人在看(传输层才知道:
-  // 出局玩家、观战者都还连着),而本模块只看得到"还有没有人能行动"——两者不等价。
-  // 停表由上层显式调 pauseClock/resumeClock,见 server.js。
+  // Note: this does not touch the deadline. "Whether the clock should stop" depends on whether anyone is still watching (only the transport layer knows that:
+  // eliminated players and spectators are still connected), while this module can only see "whether anyone can still act" -- the two are not equivalent.
+  // Stopping the clock is done by the layer above explicitly calling pauseClock/resumeClock, see server.js.
 
-  // 没有可行动的人了,不必再判断推进(空数组 every 恒真,会误推进阶段)
+  // There is nobody left who can act, so there is no need to check for advancement any more (every on an empty array is trivially true and would wrongly advance the phase)
   if (presentIds(s).length === 0) return;
 
-  // 掉线的人可能正是大家在等的最后一个 —— 重新检查当前阶段能否推进
+  // The player who disconnected may have been the very last one everyone was waiting on -- re-check whether the current phase can advance
   if (s.phase === 'reveal' && presentIds(s).every((id) => s.ready[id])) {
     enterNight(s);
   } else if (s.phase === 'night') {
     maybeResolveNight(s);
   } else if (s.phase === 'speech' && playerId === currentSpeaker(s)) {
-    // 正在发言的人掉线 → 直接轮下一个,不让全场等满他的 45 秒
+    // The person currently speaking disconnected → move straight on to the next one, instead of making the whole table wait out his full 45 seconds
     nextSpeaker(s);
   } else if (s.phase === 'witch' && s.roles[playerId] === ROLE.WITCH) {
-    // 全场都在等女巫,她掉线了 → 视为跳过,别让所有人干等到超时
+    // Everyone is waiting on the witch and she has disconnected → treat it as a skip, so nobody has to sit around until the timeout
     s.nightActions.witch = s.nightActions.witch || {};
     finishNight(s);
   } else if (s.phase === 'hunter' && playerId === s.pendingHunter) {
     s.hunterCanShoot = false;
     resumeAfterHunter(s);
   } else if (s.phase === 'day' || s.phase === 'pk') {
-    hurryDayIfAllVoted(s);   // 走的人若正好是剩下唯一没投的,压缩倒计时
+    hurryDayIfAllVoted(s);   // If the person who left happened to be the only one left who had not voted, shorten the countdown
   }
 }
 
-// 宽限期超时仍未回来 → 真正判出局,并重跑胜负。
-// 只标 absent 不够:checkWin 用 aliveIds,唯一的狼永久退出后好人永远赢不了,
-// 只能白天把这个幽灵投出去。
+// Still not back once the grace period expires → actually eliminate them, and re-run the win conditions.
+// Just marking them absent is not enough: checkWin uses aliveIds, so once the only wolf leaves permanently the good side could never win,
+// and the only recourse would be to vote that ghost out during the day.
 function eliminatePlayer(s, playerId) {
   if (!s || s.phase === 'ended' || !s.alive[playerId]) return [];
   s.alive[playerId] = false;
   delete s.absent[playerId];
   s.log.push({ type: 'left', playerId });
   if (checkWin(s)) return [{ type: 'game_over' }];
-  // 走的人可能正是大家在等的最后一个 —— 重新检查当前阶段能否推进
+  // The player who left may have been the very last one everyone was waiting on -- re-check whether the current phase can advance
   if (s.phase === 'reveal' && presentIds(s).length && presentIds(s).every((id) => s.ready[id])) {
     enterNight(s);
   } else if (s.phase === 'night') {
     maybeResolveNight(s);
   } else if (s.phase === 'speech' && playerId === currentSpeaker(s)) {
-    // 正在发言的人掉线 → 直接轮下一个,不让全场等满他的 45 秒
+    // The person currently speaking disconnected → move straight on to the next one, instead of making the whole table wait out his full 45 seconds
     nextSpeaker(s);
   } else if (s.phase === 'witch' && s.roles[playerId] === ROLE.WITCH) {
     s.nightActions.witch = s.nightActions.witch || {};
@@ -681,7 +681,7 @@ function eliminatePlayer(s, playerId) {
     s.hunterCanShoot = false;
     resumeAfterHunter(s);
   } else if (s.phase === 'pk') {
-    // 出局的若是 PK 候选人:剔除他;不足 2 人则 PK 无意义,直接结算
+    // If the eliminated player was a PK candidate: drop him; with fewer than 2 left the PK is meaningless, so resolve it immediately
     s.pkCandidates = s.pkCandidates.filter((id) => id !== playerId);
     if (s.pkCandidates.length < 2) resolvePk(s);
     else hurryDayIfAllVoted(s);
@@ -691,9 +691,9 @@ function eliminatePlayer(s, playerId) {
   return [];
 }
 
-// ── 停表/恢复(由上层在"房间内一个连接都没有 / 有人重连"时调用) ──
-// deadline 是绝对时间戳,停表期间会继续"走";不挂起的话重连后首次 tick
-// 就判定过期,当前阶段被瞬间跳过。
+// ── Stopping/resuming the clock (called by the layer above when "there is not a single connection left in the room / somebody has reconnected") ──
+// The deadline is an absolute timestamp, so it keeps "running" while the clock is stopped; without suspending it, the first tick after a reconnect
+// would find it expired and the current phase would be skipped instantly.
 function pauseClock(s) {
   if (!s || s.phase === 'ended' || s.deadline == null) return;
   s.pausedRemainMs = Math.max(0, s.deadline - now());
@@ -706,14 +706,14 @@ function resumeClock(s) {
   s.pausedRemainMs = null;
 }
 
-// 重连:恢复在场状态(座位、角色、存活都还在)
+// Reconnect: restore the present state (seat, role and alive status are all still there)
 function restorePlayer(s, playerId) {
   if (!s || !(playerId in s.alive)) return;
   delete s.absent[playerId];
-  // 不在这里恢复倒计时:停表与否由上层按"房间还有没有连接"决定(见 resumeClock)
+  // The countdown is not resumed here: whether the clock is stopped is decided by the layer above based on "whether the room still has any connections" (see resumeClock)
 }
 
-// ── 分角色序列化视图(信息隔离) ──
+// ── Per-role serialized view (information hiding) ──
 function serializeStateFor(s, playerId) {
   const myRole = s.roles[playerId];
   const view = {
@@ -729,50 +729,50 @@ function serializeStateFor(s, playerId) {
     lastNightVictim: s.lastNightVictim,
     lastVotedOut: s.lastVotedOut,
     hostId: s.hostId,
-    deadline: s.deadline,               // 当前阶段截止时间戳,前端据此显示倒计时
-    cfg: s.cfg,                         // 房主配置(前端提示"平票将进入 PK"等)
+    deadline: s.deadline,               // Deadline timestamp of the current phase, which the frontend uses to show the countdown
+    cfg: s.cfg,                         // Host config (so the frontend can show hints like "a tie will go to a PK")
   };
-  // 狼人:能看到同伴狼人(不含自己;单狼局则为空数组)
+  // Wolves: can see their fellow wolves (excluding themselves; an empty array in a one-wolf game)
   if (myRole === ROLE.WOLF) {
     view.wolfTeammates = s.players
       .filter((p) => s.roles[p.id] === ROLE.WOLF && p.id !== playerId)
       .map((p) => p.id);
   }
-  // 预言家:能看到自己的查验结果
+  // Seer: can see their own check results
   if (myRole === ROLE.SEER) {
     view.seerResults = s.seerResults[playerId] || {};
   }
-  // 女巫:能看到自己剩余的药,以及(仅在她行动的那一段)今晚的刀口。
-  // 刀口只发给女巫本人 —— 发给别人等于直接公开今晚谁死。
+  // Witch: can see how many of her potions are left, and (only during her own segment) tonight's kill target.
+  // The kill target is sent to the witch alone -- sending it to anybody else would directly reveal who dies tonight.
   if (myRole === ROLE.WITCH) {
     view.potions = s.potions;
     if (s.phase === 'witch') {
       view.witchVictim = s.nightActions.victim;
       view.iActed = !!s.nightActions.witch;
-      // 首夜可自救,之后不行 —— 前端据此禁用解药按钮
+      // Self-healing is allowed on the first night but not afterwards -- the frontend uses this to disable the healing potion button
       view.canSelfHeal = s.round <= 1;
     }
   }
-  // 猎人:知道自己还能不能开枪(枪响过就没了)
+  // Hunter: knows whether he can still shoot (once the gun has gone off, it is spent)
   if (myRole === ROLE.HUNTER) view.hunterCanShoot = s.hunterCanShoot;
-  // 猎人开枪阶段:全房间都知道"轮到猎人了"(公开信息,他已经出局),
-  // 但只有猎人本人拿到可开枪的标记
+  // The hunter's shooting phase: the whole room knows "it is the hunter's turn" (public information, he is already eliminated),
+  // but only the hunter himself gets the flag that lets him shoot
   if (s.phase === 'hunter') {
     view.pendingHunter = s.pendingHunter;
     view.iAmShooting = playerId === s.pendingHunter;
   }
-  // 身份揭晓:本人是否已就绪 + 就绪进度(等其他人点"进入游戏")
+  // Role reveal: whether this player is ready + the readiness progress (waiting for the others to click "enter game")
   if (s.phase === 'reveal') {
     view.iReady = !!s.ready[playerId];
     view.readyCount = aliveIds(s).filter((id) => s.ready[id]).length;
     view.readyTotal = aliveIds(s).length;
   }
-  // 夜晚:告诉本人是否已行动(狼人已投刀 / 预言家已查验),前端显示等待态
+  // Night: tell this player whether they have already acted (a wolf has voted for a kill / the seer has checked), so the frontend can show a waiting state
   if (s.phase === 'night') {
     if (myRole === ROLE.WOLF) view.iActed = playerId in (s.nightActions.wolfTargetVotes || {});
     else if (myRole === ROLE.SEER) view.iActed = s.nightActions.seerCheck != null;
   }
-  // 发言阶段:谁在说、还有谁没说,都是公开信息(线下所有人都看得见轮到谁)
+  // Speech phase: who is talking and who has yet to talk are both public information (offline everybody can see whose turn it is)
   if (s.phase === 'speech') {
     view.speechOrder = s.speechOrder;
     view.currentSpeaker = currentSpeaker(s);
@@ -780,20 +780,20 @@ function serializeStateFor(s, playerId) {
     view.spokenCount = s.speechIndex;
     view.speechTotal = (s.speechOrder || []).length;
   }
-  // 白天/PK(投票):公开当前票型(谁投了谁);并标记本人当前票与是否已投
+  // Day/PK (voting): the current vote spread is public (who voted for whom); also flag this player's current vote and whether they have voted
   if (s.phase === 'day' || s.phase === 'pk') {
     view.votes = s.votes;
     view.iVoted = playerId in s.votes;
     view.myVote = playerId in s.votes ? s.votes[playerId] : undefined;
-    // 该阶段应投票者全投完 → 前端提示"即将结算",解释倒计时为何突然缩短
+    // Everyone who is supposed to vote in this phase has voted → the frontend shows "about to resolve", which explains why the countdown suddenly got shorter
     const voters = expectedVoters(s);
     view.dayAllVoted = voters.length > 0 && voters.every((id) => id in s.votes);
     if (s.phase === 'pk') {
-      view.pkCandidates = s.pkCandidates;               // 前端据此限定投票对象、显示 PK 提示
+      view.pkCandidates = s.pkCandidates;               // The frontend uses this to restrict who can be voted for and to show the PK hint
       view.iAmPkCandidate = s.pkCandidates.includes(playerId);
     }
   }
-  // 结束:公开所有身份
+  // Ended: reveal every role
   if (s.phase === 'ended') {
     view.winner = s.winner;
     view.roles = s.roles;
@@ -821,9 +821,9 @@ module.exports = {
   pauseClock,
   resumeClock,
   ROLE,
-  // 房主配置元数据(供大厅设置面板)。
-  // type:'toggle' → 开关;type:'options' → 一排可选值按钮。两者都由通用面板渲染,
-  // 加新配置项只改这里,前端不用动。
+  // Host config metadata (for the lobby settings panel).
+  // type:'toggle' → a switch; type:'options' → a row of selectable value buttons. Both are rendered by the generic panel,
+  // so adding a new config item only means changing this, with no frontend change needed.
   configSchema: {
     tiePk: { type: 'toggle', default: DEFAULTS.tiePk,
              label: '平票进入 PK 加赛', hint: '白天平票时,平票者发言后其余玩家重投一轮' },

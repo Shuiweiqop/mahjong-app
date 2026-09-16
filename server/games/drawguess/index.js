@@ -1,35 +1,42 @@
-// 你画我猜(Draw & Guess)—— 服务端权威游戏模块。
+// Draw & Guess -- server-authoritative game module.
 //
-// 实现平台统一游戏接口:
+// Implements the platform's shared game interface:
 //   createInitialState(players)
 //   applyAction(state, action, playerId) -> { state, events, error }
-//   serializeStateFor(state, playerId)   -> 该玩家可见的视图(画手可见词、猜者不可见)
+//   serializeStateFor(state, playerId)   -> the view visible to that player (the drawer sees the word, guessers do not)
 //   isGameOver(state)                    -> { over, ranking } | false
 //
-// 状态全部放内存(由上层 rooms 管理器持有)。纯逻辑,不碰 socket/db,便于测试。
+// All state lives in memory (held by the rooms manager one layer up). Pure
+// logic, no socket/db access, which keeps it easy to test.
 
 const { pickWords, buildWordPool } = require('./words');
 
-const REVEAL_SECONDS = 5;       // 揭晓/间隔时长
-const PICK_SECONDS = 15;        // 画手选词时长
+const REVEAL_SECONDS = 5;       // Duration of the reveal / intermission
+const PICK_SECONDS = 15;        // How long the drawer has to pick a word
 
-// 房主可配置项的默认值与取值范围
+// Defaults and permitted values for the host-configurable settings
 const DEFAULTS = { drawSeconds: 80, roundsPerPlayer: 2, categories: [], customWords: [] };
 const DRAW_SECONDS_OPTIONS = [45, 60, 80, 120];
 const ROUNDS_OPTIONS = [1, 2, 3];
 
-// 单轮笔画上限。strokes 只在换轮时清空,轮内只增不减;画布是归一化坐标,
-// 2 万段足够画满一整轮(实测正常作画 60 秒约 1 万段)。到顶后丢弃新笔画而不是报错 ——
-// 画手不该因为画得多被打断,而是"画不下了"这种可理解的降级。
+// Per-round stroke cap. strokes is only cleared when the round changes, so
+// within a round it only ever grows; the canvas uses normalized coordinates and
+// 20,000 segments is enough to fill a whole round (measured: about 10,000
+// segments for 60 seconds of normal drawing). Once the cap is hit, new strokes
+// are dropped rather than rejected with an error -- the drawer should not be
+// interrupted for drawing a lot; "the canvas is full" is a degradation they can
+// understand.
 const MAX_STROKES = 20000;
-// 单条 stroke 消息的段数上限,挡住一次性塞爆内存的恶意消息(实测 20 万段 = 22MB 视图)。
+// Cap on the number of segments in a single stroke message, which blocks a malicious message from blowing up memory in one go (measured: 200,000 segments = a 22MB view).
 const MAX_STROKES_PER_MSG = 500;
-const GUESS_MAX = 100;          // 单条猜测/发言最大长度(狼人杀那边是 CHAT_MAX=300)
+const GUESS_MAX = 100;          // Maximum length of a single guess/message (the werewolf module uses CHAT_MAX=300)
 
 const now = () => Date.now();
 
-// 只保留画布真正需要的字段,并把坐标夹回 0..1 —— 客户端可以伪造任意对象,
-// 原样存进 state 就会连同垃圾一起广播给所有人并被持久重绘。
+// Keep only the fields the canvas actually needs and clamp the coordinates back
+// into 0..1 -- a client can forge an arbitrary object, and storing it verbatim
+// in the state would broadcast the junk to everyone and have it redrawn
+// persistently.
 function sanitizeStroke(s) {
   if (!s || typeof s !== 'object') return null;
   const pt = (p) => Array.isArray(p) && p.length >= 2
@@ -43,7 +50,7 @@ function sanitizeStroke(s) {
   return { from, to, color, size };
 }
 
-// 规整房主传入的配置,防非法值
+// Normalize the configuration passed in by the host, guarding against invalid values
 function normalizeConfig(cfg = {}) {
   const drawSeconds = DRAW_SECONDS_OPTIONS.includes(cfg.drawSeconds) ? cfg.drawSeconds : DEFAULTS.drawSeconds;
   const roundsPerPlayer = ROUNDS_OPTIONS.includes(cfg.roundsPerPlayer) ? cfg.roundsPerPlayer : DEFAULTS.roundsPerPlayer;
@@ -54,8 +61,8 @@ function normalizeConfig(cfg = {}) {
   return { drawSeconds, roundsPerPlayer, categories, customWords };
 }
 
-// ── 创建初始状态 ──────────────────────────────────────────
-// players: [{ id, name }];  config: 房主设置(可选)
+// -- Create the initial state ------------------------------------------------
+// players: [{ id, name }];  config: the host's settings (optional)
 function createInitialState(players, config) {
   const cfg = normalizeConfig(config);
   const pool = buildWordPool({ categories: cfg.categories, customWords: cfg.customWords });
@@ -63,27 +70,27 @@ function createInitialState(players, config) {
     phase: 'lobby',                 // lobby | pick | draw | reveal | ended
     players: players.map((p) => ({ id: p.id, name: p.name })),
     scores: Object.fromEntries(players.map((p) => [p.id, 0])),
-    order: players.map((p) => p.id),// 画手轮转顺序
-    turnIndex: -1,                  // 当前在 order 里的位置
+    order: players.map((p) => p.id),// Rotation order of the drawer
+    turnIndex: -1,                  // Current position within order
     roundsTotal: players.length * cfg.roundsPerPlayer,
     roundsDone: 0,
     drawerId: null,
-    wordChoices: [],                // 画手选词阶段的候选
-    word: null,                     // 当前词(仅内部/画手可见)
+    wordChoices: [],                // Candidates offered during the drawer's word-picking phase
+    word: null,                     // The current word (internal / drawer-visible only)
     usedWords: [],
     guessedThisRound: {},           // { playerId: pointsAwarded }
-    absent: {},                     // 掉线玩家 { playerId: true };不轮到、不计入"全猜中"
-    pausedRemainMs: null,           // 房间无连接时挂起的剩余时长(见 pauseClock)
-    strokes: [],                    // 当前轮已画笔画(用于中途加入者补画)
-    strokeRev: 0,                   // 画布版本号:每次清空/换轮 +1,前端据此判断要不要全量重绘
-    deadline: null,                 // 当前阶段截止时间戳(ms)
+    absent: {},                     // Disconnected players { playerId: true }; skipped in the rotation and not counted towards "everyone guessed"
+    pausedRemainMs: null,           // Remaining time parked while the room has no connections (see pauseClock)
+    strokes: [],                    // Strokes drawn so far this round (used to catch up players who join mid-round)
+    strokeRev: 0,                   // Canvas revision: +1 on every clear / round change, which is how the frontend knows whether a full redraw is needed
+    deadline: null,                 // Deadline timestamp of the current phase (ms)
     hostId: players[0]?.id || null,
-    cfg,                            // 保存配置供后续使用
-    wordPool: pool,                 // 该局词池
+    cfg,                            // Keep the configuration around for later use
+    wordPool: pool,                 // The word pool for this game
   };
 }
 
-// ── 内部:进入下一轮(选词阶段) ───────────────────────────
+// -- Internal: move on to the next round (word-picking phase) -----------------
 function startNextTurn(state) {
   const events = [];
   if (state.roundsDone >= state.roundsTotal) {
@@ -94,7 +101,7 @@ function startNextTurn(state) {
     return events;
   }
 
-  if (state.order.length === 0) {           // 全员掉线兜底
+  if (state.order.length === 0) {           // Fallback for everyone having disconnected
     state.phase = 'ended';
     state.drawerId = null;
     state.deadline = null;
@@ -106,7 +113,7 @@ function startNextTurn(state) {
   state.phase = 'pick';
   state.word = null;
   state.strokes = [];
-  state.strokeRev = (state.strokeRev || 0) + 1;   // 换轮:画布作废,前端需清屏
+  state.strokeRev = (state.strokeRev || 0) + 1;   // Round change: the canvas is void, the frontend needs to clear the screen
   state.guessedThisRound = {};
   state.wordChoices = pickWords(3, state.usedWords, state.wordPool).map((w) => w.word);
   state.deadline = now() + PICK_SECONDS * 1000;
@@ -114,7 +121,7 @@ function startNextTurn(state) {
   return events;
 }
 
-// ── 内部:结束本轮(揭晓) ─────────────────────────────────
+// -- Internal: end this round (the reveal) ------------------------------------
 function endRound(state, reason) {
   state.roundsDone += 1;
   state.phase = 'reveal';
@@ -122,38 +129,41 @@ function endRound(state, reason) {
   return [{ type: 'reveal', word: state.word, reason, scores: { ...state.scores } }];
 }
 
-// ── 应用一个动作(服务端权威校验) ─────────────────────────
+// -- Apply one action (validated server-authoritatively) ----------------------
 // action: { type, ... }
-//   { type:'start' }                        房主开始游戏
-//   { type:'pick', word }                   画手选定词
-//   { type:'stroke', stroke }               画手画一笔
-//   { type:'clear' }                        画手清空画布
-//   { type:'guess', text }                  猜者提交猜测
-//   { type:'tick' }                         服务端计时器驱动(检查是否到点)
+//   { type:'start' }                        the host starts the game
+//   { type:'pick', word }                   the drawer settles on a word
+//   { type:'stroke', stroke }               the drawer draws a stroke
+//   { type:'clear' }                        the drawer clears the canvas
+//   { type:'guess', text }                  a guesser submits a guess
+//   { type:'tick' }                         driven by the server-side timer (checks whether the deadline has passed)
 function applyAction(state, action, playerId) {
   const events = [];
 
-  // 观战者(以及任何不在本局里的 id)不能行动。tick 是服务端驱动的,playerId 为 null。
-  // 不挡住的话观战者能"猜词":猜中会进 scores 与 guessedThisRound,而
-  // serializeStateFor 正是按 guessedThisRound 决定给不给 word —— 于是观战者
-  // 猜一次就把答案拿到手了,还能靠提前凑满"全员猜中"直接结束本轮。
+  // Spectators (and any id not in this game) cannot act. tick is server-driven,
+  // with playerId null.
+  // Without this guard a spectator could "guess": a correct guess would land in
+  // scores and guessedThisRound, and guessedThisRound is exactly what
+  // serializeStateFor uses to decide whether to send the word -- so one guess
+  // would hand the spectator the answer, and they could also end the round early
+  // by making up the "everyone guessed" quota.
   if (action.type !== 'tick' && !state.players.some((p) => p.id === playerId)) {
-    return { error: '你不是本局玩家' };
+    return { error: 'game.notAPlayer' };
   }
 
   switch (action.type) {
     case 'start': {
-      if (playerId !== state.hostId) return { error: '只有房主能开始' };
-      if (state.phase !== 'lobby') return { error: '游戏已开始' };
-      if (state.players.length < 2) return { error: '至少需要 2 名玩家' };
+      if (playerId !== state.hostId) return { error: 'room.hostOnlyStart' };
+      if (state.phase !== 'lobby') return { error: 'room.alreadyStarted' };
+      if (state.players.length < 2) return { error: 'room.needTwoPlayers' };
       events.push(...startNextTurn(state));
       return { state, events };
     }
 
     case 'pick': {
-      if (state.phase !== 'pick') return { error: '当前不是选词阶段' };
-      if (playerId !== state.drawerId) return { error: '只有画手能选词' };
-      if (!state.wordChoices.includes(action.word)) return { error: '无效的词' };
+      if (state.phase !== 'pick') return { error: 'draw.notPickPhase' };
+      if (playerId !== state.drawerId) return { error: 'draw.onlyDrawerPicks' };
+      if (!state.wordChoices.includes(action.word)) return { error: 'draw.invalidWord' };
       state.word = action.word;
       state.usedWords.push(action.word);
       state.wordChoices = [];
@@ -164,28 +174,28 @@ function applyAction(state, action, playerId) {
     }
 
     case 'stroke': {
-      if (state.phase !== 'draw') return { error: '当前不能作画' };
-      if (playerId !== state.drawerId) return { error: '只有画手能画' };
-      // 支持一批笔画(降延迟)或单笔(兼容)
+      if (state.phase !== 'draw') return { error: 'draw.cannotDraw' };
+      if (playerId !== state.drawerId) return { error: 'draw.onlyDrawerDraws' };
+      // Accepts a batch of strokes (lower latency) or a single one (for compatibility)
       const raw = action.strokes || (action.stroke ? [action.stroke] : []);
-      if (!Array.isArray(raw)) return { error: '笔画格式错误' };
-      // 校验 + 限量:超出单轮上限的部分直接丢弃(不报错,见 MAX_STROKES 注释)
+      if (!Array.isArray(raw)) return { error: 'draw.badStroke' };
+      // Validate + cap: anything past the per-round limit is simply dropped (no error, see the MAX_STROKES comment)
       const room = Math.max(0, MAX_STROKES - state.strokes.length);
       const strokes = raw
         .slice(0, MAX_STROKES_PER_MSG)
         .map(sanitizeStroke)
         .filter(Boolean)
         .slice(0, room);
-      if (!strokes.length) return { state, events };   // 全被丢弃:静默,不打断画手
+      if (!strokes.length) return { state, events };   // All dropped: stay silent, do not interrupt the drawer
       for (const s of strokes) state.strokes.push(s);
-      // 只广播本批(增量),不是全量 —— 全量只在中途加入时经 serializeStateFor 补发
+      // Broadcast only this batch (the delta), not everything -- the full set is only re-sent through serializeStateFor for players joining mid-round
       events.push({ type: 'stroke', strokes, forOthers: true });
       return { state, events };
     }
 
     case 'clear': {
-      if (state.phase !== 'draw') return { error: '当前不能清空' };
-      if (playerId !== state.drawerId) return { error: '只有画手能清空' };
+      if (state.phase !== 'draw') return { error: 'draw.cannotClear' };
+      if (playerId !== state.drawerId) return { error: 'draw.onlyDrawerClears' };
       state.strokes = [];
       state.strokeRev = (state.strokeRev || 0) + 1;
       events.push({ type: 'clear' });
@@ -193,17 +203,19 @@ function applyAction(state, action, playerId) {
     }
 
     case 'guess': {
-      if (state.phase !== 'draw') return { error: '当前不能猜词' };
-      if (playerId === state.drawerId) return { error: '画手不能猜' };
-      if (state.guessedThisRound[playerId]) return { error: '你已经猜中了' };
+      if (state.phase !== 'draw') return { error: 'draw.cannotGuess' };
+      if (playerId === state.drawerId) return { error: 'draw.drawerCannotGuess' };
+      if (state.guessedThisRound[playerId]) return { error: 'draw.alreadyGuessed' };
 
-      // 截断而不是拒绝:猜错的内容会作为聊天广播,没有上限就等于给了每个人一个
-      // 任意长度的广播通道(实测 10 万字原样转发)。狼人杀那边同理,见 CHAT_MAX。
+      // Truncate rather than reject: an incorrect guess is broadcast as chat, and
+      // without a cap that would hand everyone a broadcast channel of arbitrary
+      // length (measured: 100,000 characters forwarded verbatim). The same
+      // applies in the werewolf module, see CHAT_MAX.
       const guess = String(action.text || '').trim().slice(0, GUESS_MAX);
       const correct = guess === state.word;
 
       if (correct) {
-        // 计分:剩余时间越多分越高;画手也按猜中人数得分
+        // Scoring: the more time is left the more points; the drawer also scores per player who guessed correctly
         const remaining = Math.max(0, (state.deadline - now()) / 1000);
         const pts = 100 + Math.round((remaining / state.cfg.drawSeconds) * 100);
         state.scores[playerId] = (state.scores[playerId] || 0) + pts;
@@ -243,7 +255,7 @@ function applyAction(state, action, playerId) {
     }
 
     default:
-      return { error: '未知动作' };
+      return { error: 'game.unknownAction' };
   }
 }
 

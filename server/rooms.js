@@ -1,7 +1,8 @@
-// 房间管理器(内存版)—— 平台通用的"大厅 + 房间 + 对局状态"层。
-// 现阶段不落数据库;以后接 Supabase 时只需在状态变更处加持久化。
+// Room manager (in-memory) —— the platform's general-purpose "lobby + room + match state" layer.
+// Nothing is written to a database at this stage; when Supabase is wired up later, persistence
+// only needs to be added at the points where state changes.
 //
-// 一个房间 = { code, gameId, hostId, members[], game(模块), state(对局状态), timer }
+// One room = { code, gameId, hostId, members[], game (the module), state (match state), timer }
 
 const crypto = require('crypto');
 const { getGame } = require('./games/registry');
@@ -9,7 +10,7 @@ const { getGame } = require('./games/registry');
 const rooms = new Map(); // code -> room
 
 function generateRoomCode() {
-  // 6 位大写字母数字,去掉易混字符
+  // 6 uppercase alphanumeric characters, with the easily confused ones removed
   const chars = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
   let code;
   do {
@@ -18,10 +19,10 @@ function generateRoomCode() {
   return code;
 }
 
-// 创建房间。creator: { id, name }
+// Create a room. creator: { id, name }
 function createRoom(gameId, creator) {
   const game = getGame(gameId);
-  if (!game) return { error: '未知游戏' };
+  if (!game) return { error: 'room.unknownGame' };
   const code = generateRoomCode();
   const room = {
     code,
@@ -29,11 +30,12 @@ function createRoom(gameId, creator) {
     game,
     hostId: creator.id,
     members: [{ id: creator.id, name: creator.name }],
-    spectators: [],    // 中途进来的观战者(不参与对局,不占 maxPlayers)
-    state: null,       // 开始前为 null
-    config: {},        // 房主在大厅设置的游戏配置
-    // 观战者是否可见全部身份(上帝视角)。默认关闭:开着的话同局玩家开个小号
-    // 进来观战就能看穿全场。由房主在大厅显式打开。
+    spectators: [],    // spectators who arrived mid-match (they do not take part and do not count toward maxPlayers)
+    state: null,       // null before the match starts
+    config: {},        // the game configuration the host set in the lobby
+    // Whether spectators can see everyone's identity (god view). Off by default: if it were on, a player in the
+    // match could join as a spectator on an alt account and see straight through the whole game.
+    // The host has to turn it on explicitly in the lobby.
     spectatorGodView: false,
     timer: null,
   };
@@ -45,12 +47,12 @@ function getRoom(code) {
   return rooms.get((code || '').toUpperCase()) || null;
 }
 
-// 加入房间
+// Join a room
 function joinRoom(code, member) {
   const room = getRoom(code);
-  if (!room) return { error: '房间不存在' };
+  if (!room) return { error: 'room.notFound' };
 
-  // 重连:该 id 本来就在这局里 → 坐回原座位(不占新名额,不受满员限制)
+  // Reconnect: this id was already in this match → sit back down in the original seat (it does not take a new slot and is not subject to the full-room limit)
   const inGame = room.state && room.state.players?.some((p) => p.id === member.id);
   if (inGame) {
     if (!room.members.find((m) => m.id === member.id)) {
@@ -62,10 +64,11 @@ function joinRoom(code, member) {
     return { room, rejoined: true, events };
   }
 
-  // 对局已开始且此人不属于这局 → 作为观战者加入(不进 state.players,没有角色,
-  // 不占 maxPlayers 名额)。观战者不能行动,视图由 spectatorViewFor 单独生成。
-  // 注意:createInitialState 建出来的 state 初始 phase 就是 'lobby'(要等 start 动作才推进),
-  // 所以"是否已开局"要看 state 是否存在,不能看 phase。
+  // The match has already started and this person is not part of it → join as a spectator (they do not enter
+  // state.players, have no role, and do not take a maxPlayers slot). Spectators cannot act, and their view is
+  // generated separately by spectatorViewFor.
+  // Note: the state built by createInitialState starts in phase 'lobby' (it only advances on the start action),
+  // so "has the match started" must be decided by whether state exists, not by phase.
   if (room.state) {
     if (!room.spectators.find((s) => s.id === member.id)) {
       room.spectators.push({ id: member.id, name: member.name });
@@ -73,20 +76,20 @@ function joinRoom(code, member) {
     return { room, spectator: true };
   }
 
-  if (room.members.length >= room.game.maxPlayers) return { error: '房间已满' };
+  if (room.members.length >= room.game.maxPlayers) return { error: 'room.full' };
   if (!room.members.find((m) => m.id === member.id)) {
     room.members.push({ id: member.id, name: member.name });
   }
   return { room };
 }
 
-// 离开房间;若空则销毁。
-// 返回受影响的游戏事件(如画手掉线导致换轮),调用方据此广播。
+// Leave a room; destroy it if it becomes empty.
+// Returns the affected game events (such as the drawer dropping causing a round change), which the caller broadcasts.
 function leaveRoom(code, memberId) {
   const room = getRoom(code);
   if (!room) return [];
 
-  // 观战者离开:不影响对局,直接摘掉
+  // A spectator leaving: this does not affect the match, so just drop them
   if (room.spectators.some((s) => s.id === memberId)) {
     room.spectators = room.spectators.filter((s) => s.id !== memberId);
     if (room.members.length === 0 && room.spectators.length === 0) {
@@ -98,25 +101,28 @@ function leaveRoom(code, memberId) {
 
   room.members = room.members.filter((m) => m.id !== memberId);
 
-  // 同步对局状态:成员列表和 state 是两份数据,不同步就会留下"幽灵玩家"
-  //(仍被算作存活/仍在轮转里),导致流程卡在等一个永远不会行动的人。
-  // 走到 leaveRoom 说明是真的离开(宽限期已过或主动退出),用 eliminatePlayer
-  // 判其出局并重跑胜负 —— 只标 absent 的话唯一的狼退出后好人永远赢不了。
+  // Keep the match state in sync: the member list and the state are two separate pieces of data, and failing to
+  // sync them leaves a "ghost player" behind (still counted as alive / still in the turn rotation), which makes
+  // the flow hang waiting for someone who will never act.
+  // Reaching leaveRoom means the departure is real (the grace period has expired, or they quit deliberately), so
+  // use eliminatePlayer to rule them out and re-evaluate the win condition —— merely marking them absent would
+  // mean the villagers can never win once the only werewolf quits.
   let events = [];
   if (room.state) {
     const drop = room.game.eliminatePlayer || room.game.removePlayer;
     if (drop) events = drop(room.state, memberId) || [];
   }
 
-  // 玩家全走光但还有观战者:房间不能销毁,否则观战者卡在一个已不存在的房间里
-  //(sync 什么都拿不到)。等观战者也走完再回收(见上面的观战者分支)。
+  // All the players have left but spectators remain: the room must not be destroyed, or the spectators would be
+  // stuck in a room that no longer exists (sync would return nothing at all). Reclaim it once the spectators have
+  // left too (see the spectator branch above).
   if (room.members.length === 0 && room.spectators.length === 0) {
     clearTimer(room);
     rooms.delete(room.code);
     return [];
   }
-  // 房主离开 → 转移房主(state.hostId 也要跟着变,否则局内房主动作会认错人)
-  if (room.members.length === 0) return events;   // 只剩观战者,无房主可转移
+  // The host left → transfer the host role (state.hostId has to change along with it, or in-match host actions would target the wrong person)
+  if (room.members.length === 0) return events;   // only spectators remain, so there is no one to transfer the host role to
   if (room.hostId === memberId) {
     room.hostId = room.members[0].id;
     if (room.state) room.state.hostId = room.hostId;
@@ -124,10 +130,12 @@ function leaveRoom(code, memberId) {
   return events;
 }
 
-// 观战者视图。
-// 基线:用一个"不存在的玩家 id"调游戏模块的 serializeStateFor —— 该 id 没有角色,
-// 拿到的天然就是纯公开信息(不会泄露任何人的身份),不需要各游戏另写一套逻辑。
-// 房主开启上帝视角后,再附加 roles;对局结束时本来就公开身份,不受开关影响。
+// The spectator view.
+// Baseline: call the game module's serializeStateFor with a "player id that does not exist" —— that id has no
+// role, so what comes back is naturally pure public information (it cannot leak anyone's identity), and no game
+// has to write a separate set of logic for it.
+// Once the host enables god view, roles are attached on top; when the match ends identities are public anyway, so
+// that is unaffected by the toggle.
 const SPECTATOR_ID = '__spectator__';
 function spectatorViewFor(room) {
   const view = room.game.serializeStateFor(room.state, SPECTATOR_ID);
@@ -140,16 +148,17 @@ function spectatorViewFor(room) {
   return view;
 }
 
-// 开始对局(用当前成员 + 房主配置创建初始状态)
+// Start the match (build the initial state from the current members + the host's configuration)
 function startGame(room) {
   room.state = room.game.createInitialState(room.members, room.config);
   room.state.hostId = room.hostId;
   return room.state;
 }
 
-// 再来一局:清回大厅,复用现有的大厅/开始流程。
-// 上一局的观战者(中途进来的)转正为正式成员 —— 新一局他们能真正参与;
-// 若因此超出 maxPlayers 则截断(先到先得)。config 保留,让"相同配置再来"顺滑。
+// Rematch: clear back to the lobby and reuse the existing lobby/start flow.
+// The previous match's spectators (who arrived mid-match) are promoted to full members —— in the new match they
+// can genuinely take part; if that would exceed maxPlayers the list is truncated (first come, first served).
+// config is preserved, to make "play again with the same settings" smooth.
 function resetToLobby(room) {
   clearTimer(room);
   for (const sp of room.spectators) {
