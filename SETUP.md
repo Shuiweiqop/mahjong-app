@@ -75,7 +75,7 @@ cd ../client && npm install
 
 # 2. Start the backend (terminal 1)
 cd server && npm start          # → http://localhost:3001
-#   Success when you see "📦 无 DATABASE_URL, 使用内存存储" + "🎮 ... 运行于"
+#   Success when you see "📦 No DATABASE_URL, using in-memory storage" + "🎮 ... running at"
 
 # 3. Start the frontend (terminal 2)
 cd client && npm run dev        # → http://localhost:5173
@@ -160,6 +160,6 @@ open an **incognito window** at the same URL → join with the room code → hos
 
 **Successful startup log markers**:
 ```
-🐘 Postgres schema 就绪          # connected to Supabase (production)
-🎮 游戏平台服务器运行于 ...        # server running
+🐘 Postgres schema ready          # connected to Supabase (production)
+🎮 Game platform server running at ...   # server running
 ```

@@ -1,14 +1,19 @@
 import { useEffect, useRef, useState } from 'react';
+import { useT } from './i18n.jsx';
 
-// 画布组件。
-// - canDraw=true(画手):可自由绘制,每段线通过 onStroke 上报;并显示工具条。
-// - canDraw=false(猜者):只读,通过 ref 接收远端笔画实时重绘。
-// 笔画格式:{ from:{x,y}, to:{x,y}, color, size }  坐标为 0..1 归一化(适配不同屏幕)。
+// Canvas component.
+// - canDraw=true (the drawer): free drawing; every segment is reported through
+//   onStroke, and the toolbar is shown.
+// - canDraw=false (the guessers): read-only, redrawing remote strokes in real time
+//   through the ref.
+// Stroke format: { from:{x,y}, to:{x,y}, color, size }, with coordinates normalised
+// to 0..1 so they map correctly onto any screen size.
 
 const COLORS = ['#111827', '#ff6b6b', '#ffb547', '#3ecf8e', '#6c7dfc', '#e879f9', '#8b5e3c', '#ffffff'];
 const SIZES = [3, 6, 12, 22];
 
 const DrawCanvas = ({ canDraw, onStroke, onClear, strokeApiRef }) => {
+  const t = useT();
   const canvasRef = useRef(null);
   const drawing = useRef(false);
   const last = useRef(null);
@@ -18,7 +23,7 @@ const DrawCanvas = ({ canDraw, onStroke, onClear, strokeApiRef }) => {
   const sizeRef = useRef(size);
   colorRef.current = color; sizeRef.current = size;
 
-  // 在 canvas 上画一段线(坐标归一化 0..1)
+  // Draw one segment on the canvas (coordinates normalised to 0..1)
   const drawSeg = (from, to, col, sz) => {
     const cv = canvasRef.current;
     if (!cv) return;
@@ -39,7 +44,8 @@ const DrawCanvas = ({ canDraw, onStroke, onClear, strokeApiRef }) => {
     cv.getContext('2d').clearRect(0, 0, cv.width, cv.height);
   };
 
-  // 暴露给父组件:远端笔画/清空 + 批量重绘(用于中途加入补画)
+  // Exposed to the parent: remote strokes, clear, and a bulk redraw (used to catch up
+  // a player who joined mid-round)
   useEffect(() => {
     if (!strokeApiRef) return;
     strokeApiRef.current = {
@@ -60,7 +66,9 @@ const DrawCanvas = ({ canDraw, onStroke, onClear, strokeApiRef }) => {
   };
 
   const start = (e) => { if (!canDraw) return; drawing.current = true; last.current = pos(e); };
-  // 批量缓冲:本地立即画(流畅),笔画攒进 buffer 每 ~60ms 发一批,大幅减少消息数(降延迟)
+  // Batching buffer: draw locally straight away so it stays smooth, while strokes
+  // accumulate and ship roughly every 60ms. That cuts the message count sharply, which
+  // keeps latency down.
   const buffer = useRef([]);
   const flushTimer = useRef(null);
   const flush = () => {
@@ -77,11 +85,11 @@ const DrawCanvas = ({ canDraw, onStroke, onClear, strokeApiRef }) => {
     e.preventDefault();
     const cur = pos(e);
     const stroke = { from: last.current, to: cur, color: colorRef.current, size: sizeRef.current };
-    drawSeg(stroke.from, stroke.to, stroke.color, stroke.size); // 本地即时绘制
-    queueStroke(stroke);                                         // 批量上报
+    drawSeg(stroke.from, stroke.to, stroke.color, stroke.size); // draw locally, immediately
+    queueStroke(stroke);                                         // report in batches
     last.current = cur;
   };
-  const end = () => { drawing.current = false; last.current = null; flush(); }; // 抬笔立即冲刷
+  const end = () => { drawing.current = false; last.current = null; flush(); }; // flush as soon as the pen lifts
 
   return (
     <div>
@@ -113,7 +121,7 @@ const DrawCanvas = ({ canDraw, onStroke, onClear, strokeApiRef }) => {
           ))}
           <button style={{ marginLeft: 'auto', background: 'var(--surface-2)', color: 'var(--danger)', border: '1px solid var(--border)',
             borderRadius: 8, padding: '6px 14px', cursor: 'pointer', fontWeight: 700 }}
-            onClick={() => { clearCanvas(); onClear?.(); }}>清空</button>
+            onClick={() => { clearCanvas(); onClear?.(); }}>{t('draw.canvasClear')}</button>
         </div>
       )}
     </div>

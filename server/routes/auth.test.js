@@ -1,8 +1,8 @@
-// 认证路由测试 —— 起一个真实的 express 实例打 HTTP,不 mock。
+// Auth route tests —— they spin up a real express instance and make HTTP calls, with no mocking.
 //
-// 这里守的是两类"错了也不会有任何东西变红"的问题:
-//   1. JWT 密钥降级成公开的硬编码值(服务照常启动,登录照常工作,但谁都能伪造登录态)
-//   2. 注册端的输入校验(bcrypt 在 72 字节处截断,不挡住就等于用户密码被静默削短)
+// What is guarded here are two classes of problem that "turn nothing red when they go wrong":
+//   1. The JWT secret degrading into a public hardcoded value (the service starts as usual and logging in works as usual, but anyone can forge a login session)
+//   2. The input validation on the registration endpoint (bcrypt truncates at 72 bytes, so not blocking it means the user's password is silently shortened)
 //
 //   cd server && npm test
 
@@ -11,7 +11,7 @@ const assert = require('node:assert');
 const express = require('express');
 const jwt = require('jsonwebtoken');
 
-// 确保以"本地开发"模式载入(无 DATABASE_URL → 内存存储 + 随机密钥)
+// Make sure it is loaded in "local development" mode (no DATABASE_URL → in-memory storage + a random secret)
 delete process.env.DATABASE_URL;
 delete process.env.JWT_SECRET;
 
@@ -38,31 +38,31 @@ const post = async (path, body) => {
   return { status: res.status, body: await res.json() };
 };
 
-// 每个用例用不同邮箱,避免"邮箱已注册"互相干扰
+// Each test case uses a different email, to avoid "email already registered" interfering between them
 let n = 0;
 const freshEmail = () => `user${Date.now()}_${n++}@example.com`;
 
-// ── 密钥 ──
+// ── The secret ──
 
-test('JWT 密钥不是代码里的硬编码兜底值', () => {
+test('the JWT secret is not a hardcoded fallback value from the code', () => {
   assert.notStrictEqual(
     JWT_SECRET, 'platform_secret_key',
-    '密钥一旦写在开源代码里,任何人都能签出任意用户的 token'
+    'once the secret is written into open-source code, anyone can sign a token for any user'
   );
-  assert.ok(JWT_SECRET.length >= 16, '密钥太短');
+  assert.ok(JWT_SECRET.length >= 16, 'the secret is too short');
 });
 
-test('用旧的公开密钥伪造的 token 会被拒绝', () => {
+test('a token forged with the old public secret is rejected', () => {
   const forged = jwt.sign({ id: 1, email: 'victim@example.com' }, 'platform_secret_key');
   assert.throws(
     () => jwt.verify(forged, JWT_SECRET),
-    '用公开密钥签出的 token 必须验不过'
+    'a token signed with the public secret must fail verification'
   );
 });
 
-// ── 注册校验 ──
+// ── Registration validation ──
 
-test('注册成功后返回可用的 token', async () => {
+test('a usable token is returned after a successful registration', async () => {
   const email = freshEmail();
   const { status, body } = await post('/register', { email, password: 'goodpassword', name: '阿猫' });
   assert.strictEqual(status, 200, JSON.stringify(body));
@@ -70,51 +70,51 @@ test('注册成功后返回可用的 token', async () => {
   assert.strictEqual(jwt.verify(body.token, JWT_SECRET).email, email);
 });
 
-test('拒绝过短的密码', async () => {
+test('rejects a password that is too short', async () => {
   const { status } = await post('/register', { email: freshEmail(), password: '1' });
-  assert.strictEqual(status, 400, '一位数密码不该能注册');
+  assert.strictEqual(status, 400, 'a one-digit password should not be able to register');
 });
 
-test('拒绝超过 bcrypt 72 字节上限的密码', async () => {
-  // 不挡住的话 bcrypt 会静默截断:用户以为设了长密码,实际只有前 72 字节有效,
-  // 且 72 字节与 100 字节的密码可以互相登录成功。
+test("rejects a password beyond bcrypt's 72-byte limit", async () => {
+  // If this is not blocked, bcrypt truncates silently: the user thinks they set a long password, but only the
+  // first 72 bytes are actually in effect, and the 72-byte and 100-byte passwords can each log in as the other.
   const { status } = await post('/register', { email: freshEmail(), password: 'x'.repeat(100) });
-  assert.strictEqual(status, 400, '超长密码应被拒绝而不是静默截断');
+  assert.strictEqual(status, 400, 'an over-long password should be rejected rather than silently truncated');
 });
 
-test('密码长度按字节算(中文一个字最多 4 字节)', async () => {
-  // 20 个中文字 = 60 字节,合法;30 个 = 90 字节,超限
+test('password length is measured in bytes (a Chinese character is up to 4 bytes)', async () => {
+  // 20 Chinese characters = 60 bytes, which is valid; 30 = 90 bytes, which is over the limit
   assert.strictEqual((await post('/register', { email: freshEmail(), password: '密'.repeat(20) })).status, 200);
   assert.strictEqual((await post('/register', { email: freshEmail(), password: '密'.repeat(30) })).status, 400);
 });
 
-test('拒绝格式错误的邮箱', async () => {
+test('rejects malformed emails', async () => {
   for (const email of ['notanemail', 'a@b', 'a b@c.com', '@example.com']) {
     const { status } = await post('/register', { email, password: 'goodpassword' });
-    assert.strictEqual(status, 400, `"${email}" 不该通过`);
+    assert.strictEqual(status, 400, `"${email}" should not pass`);
   }
 });
 
-test('昵称被截断到上限,不能当成任意长度的广播内容', async () => {
-  // 昵称会广播给全房间
+test('the display name is truncated to the limit, so it cannot become broadcast content of arbitrary length', async () => {
+  // display names are broadcast to the whole room
   const { body } = await post('/register', { email: freshEmail(), password: 'goodpassword', name: '很长'.repeat(100) });
-  assert.ok(body.user.name.length <= 20, `昵称应被截断,实际 ${body.user.name.length} 字`);
+  assert.ok(body.user.name.length <= 20, `the display name should be truncated, but it is actually ${body.user.name.length} characters`);
 });
 
-test('非字符串参数不会让服务崩溃', async () => {
+test('non-string parameters do not crash the service', async () => {
   for (const payload of [
     { email: { $ne: null }, password: 'goodpassword' },
     { email: freshEmail(), password: 12345678 },
     { email: [], password: [] },
   ]) {
     const { status } = await post('/register', payload);
-    assert.strictEqual(status, 400, JSON.stringify(payload) + ' 应被拒绝');
+    assert.strictEqual(status, 400, JSON.stringify(payload) + ' should be rejected');
   }
 });
 
-// ── 登录 ──
+// ── Login ──
 
-test('登录成功,且密码错误时被拒绝', async () => {
+test('login succeeds, and is rejected when the password is wrong', async () => {
   const email = freshEmail();
   await post('/register', { email, password: 'goodpassword' });
 
@@ -122,18 +122,19 @@ test('登录成功,且密码错误时被拒绝', async () => {
   assert.strictEqual((await post('/login', { email, password: 'wrongpassword' })).status, 400);
 });
 
-test('登录不套用注册的强度规则(否则会把老用户锁在门外)', async () => {
-  // 规则收紧前注册的密码可能不满足新规则,但仍必须能登录。
-  // 这里直接用 db 层写入一个短密码用户,绕过注册端校验模拟历史数据。
+test('login does not apply the registration strength rules (otherwise it would lock existing users out)', async () => {
+  // A password registered before the rules were tightened may not satisfy the new rules, but it must still be able to log in.
+  // Here a user with a short password is written straight through the db layer, bypassing the registration
+  // endpoint's validation, to simulate historical data.
   const db = require('../db');
   const email = freshEmail();
   await db.createUser(email, '123', '老用户');
 
   const { status } = await post('/login', { email, password: '123' });
-  assert.strictEqual(status, 200, '老用户的弱密码仍应能登录');
+  assert.strictEqual(status, 200, "an existing user's weak password should still be able to log in");
 });
 
-test('登录失败不泄露"邮箱是否已注册"', async () => {
+test('a failed login does not reveal "whether the email is already registered"', async () => {
   const email = freshEmail();
   await post('/register', { email, password: 'goodpassword' });
 
@@ -141,13 +142,13 @@ test('登录失败不泄露"邮箱是否已注册"', async () => {
   const noSuchUser = await post('/login', { email: freshEmail(), password: 'goodpassword' });
   assert.strictEqual(
     wrongPw.body.error, noSuchUser.body.error,
-    '两种失败的提示必须一致,否则可用于枚举已注册邮箱'
+    'the messages for the two kinds of failure must be identical, otherwise they could be used to enumerate registered emails'
   );
 });
 
 // ── /me ──
 
-test('/me 校验 token,伪造与缺失都返回 401', async () => {
+test('/me validates the token, returning 401 for both a forged and a missing one', async () => {
   const email = freshEmail();
   const { body } = await post('/register', { email, password: 'goodpassword' });
 
@@ -159,5 +160,5 @@ test('/me 校验 token,伪造与缺失都返回 401', async () => {
 
   const forged = jwt.sign({ id: 1, email: 'victim@example.com' }, 'platform_secret_key');
   const withForged = await fetch(base + '/me', { headers: { authorization: `Bearer ${forged}` } });
-  assert.strictEqual(withForged.status, 401, '用公开密钥伪造的 token 必须被拒');
+  assert.strictEqual(withForged.status, 401, 'a token forged with the public secret must be rejected');
 });

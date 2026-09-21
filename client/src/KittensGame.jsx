@@ -1,34 +1,33 @@
 import { useEffect, useReducer, useState } from 'react';
 import { ui } from './ui';
+import { useT } from './i18n.jsx';
 
-// 炸弹猫游戏界面(对局中)。
-// props: state(分玩家视图), act(action=>void), me{id,name}, onLeave
-// state.phase: playing | nope(否决窗口) | defusing(有人在拆弹) | ended
+// Exploding Kittens game view (during a match).
+// props: state (per-player view), act(action=>void), me{id,name}, onLeave
+// state.phase: playing | nope (the nope window) | defusing (someone is defusing) | ended
 //
-// 信息隔离:视图里只有 myHand(自己的手牌)和别人的 handCount(张数)。
-// 牌堆顺序服务端从不下发 —— 只有 deckCount。洞悉未来的三张只有用牌者收得到。
-const CARD_INFO = {
-  bomb:    { name: '炸弹猫', emoji: '💣' },
-  defuse:  { name: '拆弹',   emoji: '🙅' },
-  nope:    { name: '否决',   emoji: '🚫' },
-  attack:  { name: '攻击',   emoji: '⚔️' },
-  skip:    { name: '跳过',   emoji: '⏭️' },
-  favor:   { name: '索要',   emoji: '🤲' },
-  shuffle: { name: '洗牌',   emoji: '🔀' },
-  future:  { name: '洞悉未来', emoji: '🔮' },
-  cat_taco:    { name: '塔可猫', emoji: '🌮' },
-  cat_melon:   { name: '西瓜猫', emoji: '🍉' },
-  cat_beard:   { name: '胡须猫', emoji: '🧔' },
-  cat_rainbow: { name: '彩虹猫', emoji: '🌈' },
-  cat_potato:  { name: '土豆猫', emoji: '🥔' },
-  cat_pair:    { name: '偷牌',   emoji: '🐾' },
-  cat_three:   { name: '指名要牌', emoji: '🐾' },
-  cat_five:    { name: '弃牌堆捡牌', emoji: '🐾' },
+// Information hiding: the view contains only myHand (your own cards) and everyone else's handCount (a
+// card count). The server never sends the deck order -- only deckCount. The three cards from See the
+// Future are delivered only to the player who played it.
+// Card emoji are language-independent; card names are looked up in the message catalog as
+// kittens.card.<id>.
+// The key order here is also the display order of the "name a card" list, so do not casually reorder it.
+const CARD_EMOJI = {
+  bomb: '💣', defuse: '🙅', nope: '🚫', attack: '⚔️', skip: '⏭️',
+  favor: '🤲', shuffle: '🔀', future: '🔮',
+  cat_taco: '🌮', cat_melon: '🍉', cat_beard: '🧔', cat_rainbow: '🌈', cat_potato: '🥔',
+  cat_pair: '🐾', cat_three: '🐾', cat_five: '🐾',
 };
-const info = (c) => CARD_INFO[c] || { name: c, emoji: '🂠' };
+// infoOf(t, 'bomb') → { name, emoji }; an unknown card falls back to its raw id, which makes a missing
+// entry easy to spot
+const infoOf = (t, c) => ({
+  name: CARD_EMOJI[c] ? t(`kittens.card.${c}`) : c,
+  emoji: CARD_EMOJI[c] || '🂠',
+});
 const ACTION_CARDS = ['attack', 'skip', 'favor', 'shuffle', 'future'];
 const needsTarget = (c) => c === 'favor' || c === 'cat_pair';
-// 抽出成函数,避免在组件 render 里直接调 Date.now()(react-hooks 会报纯度错误)
+// Extracted into a function so that Date.now() is not called directly inside a component's render
+// (react-hooks would flag that as a purity error)
 const remain = (deadline) => deadline == null ? 0 : Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
 
 function Countdown({ deadline }) {
@@ -53,16 +52,18 @@ function Countdown({ deadline }) {
 }
 
 export default function KittensGame({ state, act, me }) {
+  const t = useT();
+  const info = (c) => infoOf(t, c);
   const players = state.players || [];
-  const nameOf = (id) => players.find((p) => p.id === id)?.name || '玩家';
-  const [selected, setSelected] = useState([]);      // 选中的手牌索引
-  const [targeting, setTargeting] = useState(null);  // 需要选目标时:待出的牌
+  const nameOf = (id) => players.find((p) => p.id === id)?.name || t('common.player');
+  const [selected, setSelected] = useState([]);      // indices of the selected cards in hand
+  const [targeting, setTargeting] = useState(null);  // when a target is needed: the card about to be played
   const isSpectator = !!state.spectator;
 
   const hand = state.myHand || [];
   const myTurn = state.isMyTurn;
 
-  // 爆炸动画:log 里出现新的爆炸就播一次
+  // Explosion animation: played once whenever a new explosion shows up in the log
   const lastBoom = [...(state.log || [])].reverse().find((e) => e.type === 'eliminated' && e.reason === 'bomb');
   const boomKey = lastBoom ? `${lastBoom.playerId}-${state.log.length}` : null;
   const [shownBoom, setShownBoom] = useState(null);
@@ -73,13 +74,14 @@ export default function KittensGame({ state, act, me }) {
     return (
       <div>
         <div style={{ ...ui.card, textAlign: 'center' }}>
-          <h2 style={{ marginBottom: 8 }}>🏆 {ranking[0]?.name} 活到了最后</h2>
+          <h2 style={{ marginBottom: 8 }}>{t('kittens.winner', { name: ranking[0]?.name || t('common.player') })}</h2>
         </div>
         <div style={ui.card}>
-          <label style={ui.label}>名次</label>
+          <label style={ui.label}>{t('kittens.ranking')}</label>
           {ranking.map((p, i) => (
             <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0' }}>
-              <span>{i + 1}. {p.name}{p.id === me.id ? ' (你)' : ''}</span>
+              {/* name can be null for a player the server no longer has a record of */}
+              <span>{i + 1}. {p.name || t('common.player')}{p.id === me.id ? t('common.you') : ''}</span>
               <span>{i === 0 ? '🏆' : '💀'}</span>
             </div>
           ))}
@@ -106,7 +108,8 @@ export default function KittensGame({ state, act, me }) {
 
   const playSelected = () => {
     if (!combo) return;
-    // 三张要先报牌名、五张要先从弃牌堆挑,都要多一步选择
+    // A three-of-a-kind has to name a card first and a five-card set has to pick from the discard pile,
+    // so both need one extra selection step
     if (combo === 'cat_three' || combo === 'cat_five' || needsTarget(combo)) {
       setTargeting({ cards: selectedCards, card: combo, target: null });
       return;
@@ -125,78 +128,89 @@ export default function KittensGame({ state, act, me }) {
 
   return (
     <div>
-      {/* 状态条 */}
+      {/* Status bar */}
       <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 12, flexWrap: 'wrap' }}>
-        <span style={ui.badge}>🂠 牌堆 {state.deckCount}</span>
+        <span style={ui.badge}>{t('kittens.deck', { n: state.deckCount })}</span>
         <span style={ui.badge}>
-          {state.phase === 'nope' ? '🚫 否决窗口'
-            : state.phase === 'defusing' ? '🙅 拆弹中'
-            : myTurn ? '🎯 轮到你' : `⏳ ${nameOf(state.currentPlayer)} 的回合`}
+          {state.phase === 'nope' ? t('kittens.nopeWindow')
+            : state.phase === 'defusing' ? t('kittens.defusing')
+            : myTurn ? t('kittens.yourTurn') : t('kittens.theirTurn', { name: nameOf(state.currentPlayer) })}
         </span>
         <Countdown deadline={state.deadline} />
         {state.turnsLeft > 1 && <span style={{ ...ui.badge, background: 'var(--danger)', color: '#fff' }}>
-          ⚔️ 还要打 {state.turnsLeft} 回合
+          {t('kittens.extraTurns', { n: state.turnsLeft })}
         </span>}
       </div>
 
       <div className="game-layout" style={{ '--side': '200px' }}>
         <div style={ui.card}>
-          {/* 爆炸动画 */}
+          {/* Explosion animation */}
           {showBoom && (
-            <BoomReveal name={nameOf(lastBoom.playerId)} onDone={() => setShownBoom(boomKey)} />
+            <BoomReveal name={nameOf(lastBoom.playerId)} t={t} onDone={() => setShownBoom(boomKey)} />
           )}
 
-          {/* 否决窗口:所有人可见,有否决牌的人可以打断 */}
+          {/* Nope window: visible to everyone, and anyone holding a Nope card can interrupt */}
           {state.phase === 'nope' && state.pending && (
             <div style={{ padding: 12, borderRadius: 10, background: 'var(--surface-2)', marginBottom: 12, textAlign: 'center' }}>
               <div style={{ fontWeight: 800, marginBottom: 4 }}>
-                {nameOf(state.pending.by)} 打出了 {info(state.pending.card).emoji} {info(state.pending.card).name}
+                {t('kittens.played', {
+                  name: nameOf(state.pending.by),
+                  emoji: info(state.pending.card).emoji,
+                  card: info(state.pending.card).name,
+                })}
                 {state.pending.target && ` → ${nameOf(state.pending.target)}`}
-                {state.pending.wanted && `,要「${info(state.pending.wanted).name}」`}
+                {state.pending.wanted && t('kittens.wanted', { card: info(state.pending.wanted).name })}
               </div>
               <div style={{ fontSize: 13, color: 'var(--muted)', marginBottom: 8 }}>
                 {state.pending.nopeCount > 0
-                  ? `已被否决 ${state.pending.nopeCount} 次 —— ${state.pending.nopeCount % 2 ? '当前不会生效' : '当前会生效'}`
-                  : '窗口结束后生效'}
+                  ? t('kittens.nopedTimes', {
+                      n: state.pending.nopeCount,
+                      effect: state.pending.nopeCount % 2
+                        ? t('kittens.willNotResolve') : t('kittens.willResolve'),
+                    })
+                  : t('kittens.resolvesAfter')}
               </div>
               {state.iCanNope && (
                 <button style={{ ...ui.btnAccent, background: 'var(--danger)' }}
-                  onClick={() => act({ type: 'nope' })}>🚫 否决!</button>
+                  onClick={() => act({ type: 'nope' })}>{t('kittens.nope')}</button>
               )}
             </div>
           )}
 
-          {/* 索要:被索要者自己挑一张给出去(索要者看不到他有什么) */}
+          {/* Favor: the player being asked picks a card to give away themselves (the asker cannot see
+              what they hold) */}
           {state.phase === 'favor' && (
             state.iAmGiving ? (
               <div style={{ padding: 12, borderRadius: 10, background: 'var(--surface-2)', marginBottom: 12 }}>
                 <div style={{ fontWeight: 800, marginBottom: 4, textAlign: 'center' }}>
-                  🤲 {nameOf(state.favorTo)} 向你索要一张牌
+                  {t('kittens.favorAsked', { name: nameOf(state.favorTo) })}
                 </div>
                 <div style={{ fontSize: 13, color: 'var(--muted)', marginBottom: 8, textAlign: 'center' }}>
-                  点下方手牌选一张给他 · 超时会随机给
+                  {t('kittens.favorPick')}
                 </div>
               </div>
             ) : (
               <p style={{ textAlign: 'center', color: 'var(--muted)', marginBottom: 12 }}>
-                🤲 {nameOf(state.favorTo)} 向 {nameOf(state.favorFrom)} 索要一张牌,等他挑…
+                {t('kittens.favorWaiting', {
+                  to: nameOf(state.favorTo), from: nameOf(state.favorFrom),
+                })}
               </p>
             )
           )}
 
-          {/* 拆弹:只有当事人能选位置 */}
+          {/* Defusing: only the player involved gets to choose the position */}
           {state.phase === 'defusing' && (
             state.iAmDefusing
-              ? <DefusePicker deckSize={state.deckSize ?? 0} act={act} />
+              ? <DefusePicker deckSize={state.deckSize ?? 0} act={act} t={t} />
               : <p style={{ textAlign: 'center', color: 'var(--muted)' }}>
-                  🙅 {nameOf(state.defusingBy)} 拆掉了炸弹,正在把它塞回牌堆…
+                  {t('kittens.defusedBy', { name: nameOf(state.defusingBy) })}
                 </p>
           )}
 
-          {/* 洞悉未来的结果:只有自己看得到 */}
+          {/* The result of See the Future: visible only to you */}
           {state.myFuture && (
             <div style={{ padding: 10, borderRadius: 10, background: 'var(--surface-2)', marginBottom: 12 }}>
-              <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 6 }}>🔮 牌堆顶三张(只有你看得到)</div>
+              <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 6 }}>{t('kittens.futureTitle')}</div>
               <div style={{ display: 'flex', gap: 8 }}>
                 {state.myFuture.map((c, i) => (
                   <span key={i} style={{ ...ui.badge, background: c === 'bomb' ? 'var(--danger)' : 'var(--surface)',
@@ -208,13 +222,13 @@ export default function KittensGame({ state, act, me }) {
             </div>
           )}
 
-          {/* 出牌的第二步:选目标 / 报牌名 / 从弃牌堆挑 */}
+          {/* Second step of playing a card: pick a target / name a card / pick from the discard pile */}
           {targeting && (
             <div style={{ padding: 12, borderRadius: 10, background: 'var(--surface-2)', marginBottom: 12 }}>
               {targeting.card === 'cat_five' ? (
                 <>
                   <div style={{ fontWeight: 700, marginBottom: 8, textAlign: 'center' }}>
-                    🐾 从弃牌堆挑一张
+                    {t('kittens.pickFromDiscard')}
                   </div>
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
                     {[...new Set(state.discard || [])].map((c) => (
@@ -224,20 +238,20 @@ export default function KittensGame({ state, act, me }) {
                       </button>
                     ))}
                     {!(state.discard || []).length && (
-                      <span style={{ color: 'var(--muted)', fontSize: 13 }}>弃牌堆是空的</span>
+                      <span style={{ color: 'var(--muted)', fontSize: 13 }}>{t('kittens.discardEmpty')}</span>
                     )}
                   </div>
                 </>
               ) : !targeting.target ? (
                 <>
-                  <div style={{ fontWeight: 700, marginBottom: 8, textAlign: 'center' }}>选择目标玩家</div>
+                  <div style={{ fontWeight: 700, marginBottom: 8, textAlign: 'center' }}>{t('kittens.pickTarget')}</div>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 8 }}>
                     {players.filter((p) => p.alive && p.id !== me.id).map((p) => (
                       <button key={p.id} style={ui.btnGhost}
                         onClick={() => targeting.card === 'cat_three'
                           ? setTargeting({ ...targeting, target: p.id })
                           : finishPlay({ target: p.id })}>
-                        {p.name}({p.handCount} 张)
+                        {t('kittens.handCount', { name: p.name, n: p.handCount })}
                       </button>
                     ))}
                   </div>
@@ -245,14 +259,15 @@ export default function KittensGame({ state, act, me }) {
               ) : (
                 <>
                   <div style={{ fontWeight: 700, marginBottom: 4, textAlign: 'center' }}>
-                    🐾 向 {nameOf(targeting.target)} 指名要一张牌
+                    {t('kittens.nameACard', { name: nameOf(targeting.target) })}
                   </div>
                   <div style={{ fontSize: 12, color: 'var(--muted)', marginBottom: 8, textAlign: 'center' }}>
-                    他有就必须给,没有则落空(所有人都会看到结果)
+                    {t('kittens.nameACardHint')}
                   </div>
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
-                    {/* cat_pair/cat_three/cat_five 是组合出的伪牌名,不是真实牌,不能要 */}
-                    {Object.keys(CARD_INFO).filter((c) => !['cat_pair', 'cat_three', 'cat_five'].includes(c)).map((c) => (
+                    {/* cat_pair/cat_three/cat_five are pseudo card names produced by combinations, not
+                        real cards, so they cannot be asked for */}
+                    {Object.keys(CARD_EMOJI).filter((c) => !['cat_pair', 'cat_three', 'cat_five'].includes(c)).map((c) => (
                       <button key={c} style={{ ...ui.btnGhost, padding: '6px 10px' }}
                         onClick={() => finishPlay({ target: targeting.target, wanted: c })}>
                         {info(c).emoji} {info(c).name}
@@ -262,16 +277,16 @@ export default function KittensGame({ state, act, me }) {
                 </>
               )}
               <button style={{ ...ui.btnGhost, color: 'var(--muted)', width: '100%' }}
-                onClick={() => setTargeting(null)}>取消</button>
+                onClick={() => setTargeting(null)}>{t('common.cancel')}</button>
             </div>
           )}
 
-          {/* 我的手牌 */}
+          {/* My hand */}
           {!isSpectator && state.alive && (
             <>
               <label style={ui.label}>
-                我的手牌({hand.length} 张)
-                {state.phase === 'favor' && state.iAmGiving && ' · 点一张给出去'}
+                {t('kittens.myHand', { n: hand.length })}
+                {state.phase === 'favor' && state.iAmGiving && t('kittens.handGiveHint')}
               </label>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 12 }}>
                 {hand.map((c, i) => {
@@ -301,32 +316,32 @@ export default function KittensGame({ state, act, me }) {
                 <div style={{ display: 'flex', gap: 8 }}>
                   <button style={{ ...ui.btnGhost, flex: 1, opacity: canPlay ? 1 : 0.45 }}
                     disabled={!canPlay} onClick={playSelected}>
-                    出牌{selected.length ? `(${selected.length} 张)` : ''}
+                    {t('kittens.play')}{selected.length ? t('kittens.playCount', { n: selected.length }) : ''}
                   </button>
                   <button style={{ ...ui.btnAccent, flex: 1 }}
                     onClick={() => { setSelected([]); act({ type: 'draw' }); }}>
-                    抽牌结束回合
+                    {t('kittens.drawEndTurn')}
                   </button>
                 </div>
               )}
               {!myTurn && state.phase === 'playing' && (
                 <p style={{ color: 'var(--muted)', fontSize: 13, textAlign: 'center' }}>
-                  等待 {nameOf(state.currentPlayer)} 行动…
+                  {t('kittens.waitingFor', { name: nameOf(state.currentPlayer) })}
                 </p>
               )}
             </>
           )}
           {!isSpectator && !state.alive && (
-            <p style={{ color: 'var(--muted)', textAlign: 'center' }}>💀 你被炸飞了,静静观战…</p>
+            <p style={{ color: 'var(--muted)', textAlign: 'center' }}>{t('kittens.youExploded')}</p>
           )}
           {isSpectator && (
-            <p style={{ color: 'var(--muted)', textAlign: 'center' }}>👀 观战中,看不到任何人的手牌</p>
+            <p style={{ color: 'var(--muted)', textAlign: 'center' }}>{t('kittens.spectatorNoHands')}</p>
           )}
         </div>
 
-        {/* 玩家列表 */}
+        {/* Player list */}
         <div style={{ ...ui.card, marginBottom: 0, padding: 12 }}>
-          <label style={ui.label}>玩家</label>
+          <label style={ui.label}>{t('common.players')}</label>
           {players.map((p) => (
             <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 14, padding: '4px 0',
               color: p.alive ? 'var(--text)' : 'var(--muted)',
@@ -334,7 +349,7 @@ export default function KittensGame({ state, act, me }) {
               fontWeight: p.id === state.currentPlayer ? 800 : 400 }}>
               <span>
                 {!p.alive ? '💀' : p.id === state.currentPlayer ? '🎯' : '🙂'} {p.name}
-                {p.id === me.id ? ' (你)' : ''}{p.absent ? ' ⚠️' : ''}
+                {p.id === me.id ? t('common.you') : ''}{p.absent ? ' ⚠️' : ''}
               </span>
               <span>{p.alive ? `🂠 ${p.handCount}` : ''}</span>
             </div>
@@ -345,20 +360,21 @@ export default function KittensGame({ state, act, me }) {
   );
 }
 
-// 拆弹后选择炸弹塞回牌堆的位置。位置只有自己知道 —— 这是拆弹者唯一的信息优势。
-function DefusePicker({ deckSize, act }) {
+// After defusing, choose where the bomb goes back into the deck. Only you know that position -- it is the
+// defuser's one and only informational advantage.
+function DefusePicker({ deckSize, act, t }) {
   const spots = [
-    { pos: 0, label: '牌堆最顶(下一个人立刻抽到)' },
-    { pos: 1, label: '第 2 张' },
-    { pos: 2, label: '第 3 张' },
-    { pos: Math.floor(deckSize / 2), label: '牌堆中间' },
-    { pos: deckSize, label: '牌堆最底(最安全)' },
+    { pos: 0, label: t('kittens.spotTop') },
+    { pos: 1, label: t('kittens.spotSecond') },
+    { pos: 2, label: t('kittens.spotThird') },
+    { pos: Math.floor(deckSize / 2), label: t('kittens.spotMiddle') },
+    { pos: deckSize, label: t('kittens.spotBottom') },
   ];
   return (
     <div style={{ padding: 12, borderRadius: 10, background: 'var(--surface-2)', marginBottom: 12 }}>
-      <div style={{ fontWeight: 800, marginBottom: 4, textAlign: 'center' }}>🙅 拆弹成功!</div>
+      <div style={{ fontWeight: 800, marginBottom: 4, textAlign: 'center' }}>{t('kittens.defuseSuccess')}</div>
       <div style={{ fontSize: 13, color: 'var(--muted)', marginBottom: 8, textAlign: 'center' }}>
-        把炸弹塞回牌堆 —— 只有你知道它在哪
+        {t('kittens.defusePlace')}
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
         {spots.map((s) => (
@@ -370,8 +386,8 @@ function DefusePicker({ deckSize, act }) {
   );
 }
 
-// 爆炸动画:牌炸开,碎片四散。
-function BoomReveal({ name, onDone }) {
+// Explosion animation: the card blows up and the fragments scatter.
+function BoomReveal({ name, onDone, t }) {
   const [stage, setStage] = useState('idle');
   useEffect(() => {
     const t1 = setTimeout(() => setStage('boom'), 120);
@@ -388,7 +404,7 @@ function BoomReveal({ name, onDone }) {
       }}>
         <div style={{ fontSize: 38 }}>💥</div>
         <div style={{ fontWeight: 800 }}>{name}</div>
-        <div style={{ fontSize: 12, color: 'var(--muted)' }}>被炸飞了</div>
+        <div style={{ fontSize: 12, color: 'var(--muted)' }}>{t('kittens.blownUp')}</div>
       </div>
       {stage === 'boom' && (
         <div className="kitten-blast" style={{

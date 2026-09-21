@@ -1,7 +1,7 @@
-// 狼人杀规则测试 —— 覆盖 applyAction 里"违反了不会崩、只会安静地毁掉这局"的规则。
+// Werewolf rule tests -- covering the rules in applyAction whose violation does not crash anything, it just quietly ruins the game.
 //
-// 契约测试(../contract.test.js)管的是接口和信息隔离;这里管的是游戏规则本身。
-// 两者抓的东西不重叠:预言家一夜查穿全场既不是崩溃也不是泄露,是规则缺失。
+// The contract tests (../contract.test.js) cover the interface and information hiding; these cover the game rules themselves.
+// What the two catch does not overlap: a seer checking the whole table in a single night is neither a crash nor a leak, it is a missing rule.
 //
 //   cd server && npm test
 
@@ -13,7 +13,7 @@ const ww = require('./index');
 const P = (n) => Array.from({ length: n }, (_, i) => ({ id: 'p' + i, name: 'P' + i }));
 const roleOf = (s, r) => Object.keys(s.roles).filter((id) => s.roles[id] === r);
 
-// 造一个已进入夜晚的状态(跳过 lobby/reveal,直接测夜晚规则)
+// Build a state that has already entered the night (skipping lobby/reveal, to test the night rules directly)
 function nightState(n) {
   const s = ww.createInitialState(P(n), {});
   s.phase = 'night';
@@ -22,64 +22,64 @@ function nightState(n) {
   return s;
 }
 
-// ── 预言家 ──
+// ── Seer ──
 
-test('预言家每夜只能查验一人', () => {
+test('the seer can only check one person per night', () => {
   const s = nightState(12);
   const seer = roleOf(s, 'seer')[0];
   const others = Object.keys(s.roles).filter((id) => id !== seer);
 
   const first = ww.applyAction(s, { type: 'seer_check', target: others[0] }, seer);
-  assert.ok(!first.error, '第一次查验应当成功');
+  assert.ok(!first.error, 'the first check should succeed');
 
   const second = ww.applyAction(s, { type: 'seer_check', target: others[1] }, seer);
-  assert.ok(second.error, '同一夜的第二次查验必须被拒绝 —— 否则预言家一夜可查穿全场');
+  assert.ok(second.error, 'a second check on the same night must be rejected -- otherwise the seer could check the whole table in one night');
 
   assert.strictEqual(
     Object.keys(s.seerResults[seer]).length, 1,
-    '一夜过后累计查验结果只应有 1 条'
+    'after one night the accumulated check results should hold only 1 entry'
   );
 });
 
-test('预言家跨夜可以继续查验(每夜各一次)', () => {
+test('the seer can keep checking across nights (once per night)', () => {
   const s = nightState(8);
   const seer = roleOf(s, 'seer')[0];
   const others = Object.keys(s.roles).filter((id) => id !== seer);
 
   ww.applyAction(s, { type: 'seer_check', target: others[0] }, seer);
-  s.nightActions = { wolfTargetVotes: {}, seerCheck: null };   // 模拟进入下一夜
+  s.nightActions = { wolfTargetVotes: {}, seerCheck: null };   // simulate entering the next night
   const next = ww.applyAction(s, { type: 'seer_check', target: others[1] }, seer);
 
-  assert.ok(!next.error, '新的一夜应当可以再查一次');
-  assert.strictEqual(Object.keys(s.seerResults[seer]).length, 2, '两夜应累计 2 条结果');
+  assert.ok(!next.error, 'a new night should allow another check');
+  assert.strictEqual(Object.keys(s.seerResults[seer]).length, 2, 'two nights should accumulate 2 results');
 });
 
-test('预言家不能查验自己', () => {
+test('the seer cannot check themselves', () => {
   const s = nightState(6);
   const seer = roleOf(s, 'seer')[0];
   assert.ok(ww.applyAction(s, { type: 'seer_check', target: seer }, seer).error);
 });
 
-test('查验结果只有本人看得到,且内容正确', () => {
+test('check results are visible only to the seer themselves, and their content is correct', () => {
   const s = nightState(8);
   const seer = roleOf(s, 'seer')[0];
   const wolf = roleOf(s, 'wolf')[0];
   ww.applyAction(s, { type: 'seer_check', target: wolf }, seer);
 
-  assert.strictEqual(ww.serializeStateFor(s, seer).seerResults[wolf], 'wolf', '查狼应返回 wolf');
+  assert.strictEqual(ww.serializeStateFor(s, seer).seerResults[wolf], 'wolf', 'checking a wolf should return wolf');
 
   for (const p of s.players) {
     if (p.id === seer) continue;
     assert.strictEqual(
       ww.serializeStateFor(s, p.id).seerResults, undefined,
-      '非预言家的视图里不应出现 seerResults'
+      'seerResults should not appear in a non-seer view'
     );
   }
 });
 
-// ── 狼人 ──
+// ── Wolves ──
 
-test('狼人改刀是覆盖,不是追加(一狼一票)', () => {
+test('a wolf changing their kill target overwrites, it does not append (one wolf, one vote)', () => {
   const s = nightState(12);
   const wolf = roleOf(s, 'wolf')[0];
   const goods = Object.keys(s.roles).filter((id) => s.roles[id] !== 'wolf');
@@ -87,14 +87,14 @@ test('狼人改刀是覆盖,不是追加(一狼一票)', () => {
   ww.applyAction(s, { type: 'wolf_kill', target: goods[0] }, wolf);
   ww.applyAction(s, { type: 'wolf_kill', target: goods[1] }, wolf);
 
-  assert.strictEqual(s.nightActions.wolfTargetVotes[wolf], goods[1], '应记最后一次改刀');
+  assert.strictEqual(s.nightActions.wolfTargetVotes[wolf], goods[1], 'the last change of target should be the one recorded');
   assert.strictEqual(
     Object.keys(s.nightActions.wolfTargetVotes).length, 1,
-    '一只狼无论投几次都只占一票'
+    'a single wolf only holds one vote no matter how many times they vote'
   );
 });
 
-test('非狼人不能刀,非预言家不能查', () => {
+test('non-wolves cannot kill and non-seers cannot check', () => {
   const s = nightState(8);
   const villager = roleOf(s, 'villager')[0];
   const target = roleOf(s, 'wolf')[0];
@@ -102,7 +102,7 @@ test('非狼人不能刀,非预言家不能查', () => {
   assert.ok(ww.applyAction(s, { type: 'seer_check', target }, villager).error);
 });
 
-test('夜晚行动不能在白天发起', () => {
+test('night actions cannot be initiated during the day', () => {
   const s = nightState(8);
   s.phase = 'day';
   const wolf = roleOf(s, 'wolf')[0];
@@ -112,9 +112,9 @@ test('夜晚行动不能在白天发起', () => {
   assert.ok(ww.applyAction(s, { type: 'seer_check', target: t }, seer).error);
 });
 
-// ── 投票 ──
+// ── Voting ──
 
-test('死亡玩家不能投票', () => {
+test('dead players cannot vote', () => {
   const s = ww.createInitialState(P(6), {});
   s.phase = 'day'; s.votes = {}; s.deadline = Date.now() + 60_000;
   const dead = s.players[0].id;
@@ -122,26 +122,26 @@ test('死亡玩家不能投票', () => {
   assert.ok(ww.applyAction(s, { type: 'vote', target: s.players[1].id }, dead).error);
 });
 
-test('PK 候选人不参与 PK 投票,且只能投候选人', () => {
+test('PK candidates do not take part in the PK vote, and only candidates can be voted for', () => {
   const s = ww.createInitialState(P(6), {});
   const ids = s.players.map((p) => p.id);
   s.phase = 'pk'; s.votes = {}; s.pkCandidates = [ids[0], ids[1]];
   s.deadline = Date.now() + 30_000;
 
-  assert.ok(ww.applyAction(s, { type: 'vote', target: ids[1] }, ids[0]).error, '候选人不该能投票');
+  assert.ok(ww.applyAction(s, { type: 'vote', target: ids[1] }, ids[0]).error, 'a candidate should not be able to vote');
   assert.ok(
     ww.applyAction(s, { type: 'pk_vote', target: ids[3] }, ids[2]).error,
-    '不该能投非候选人'
+    'it should not be possible to vote for a non-candidate'
   );
   assert.ok(!ww.applyAction(s, { type: 'pk_vote', target: ids[0] }, ids[2]).error);
 });
 
-// ── 胜负 ──
+// ── Win conditions ──
 
-test('刀掉唯一的神职不会立刻结束游戏', () => {
-  // 屠神边只在神职足够多时才是有意义的胜利条件。当前板子只有 1 个神(预言家),
-  // 沿用屠神边等于"第一晚刀中某个特定的人就赢":实测狼盲刀时 6 人局 20%、
-  // 8 人局 17% 的对局在第一个白天开始前就结束,其他人一句话没说。
+test('killing the only god does not end the game immediately', () => {
+  // The god-side wipe is only a meaningful win condition when there are enough gods. The current setup has just 1 god (the seer),
+  // so keeping the god-side wipe would amount to "kill one specific person on the first night and win": measured with wolves killing blind,
+  // 20% of 6-player games and 17% of 8-player games end before the first day even begins, with nobody else having said a word.
   for (const n of [6, 8, 10, 12]) {
     const s = nightState(n);
     const seer = roleOf(s, 'seer')[0];
@@ -149,33 +149,33 @@ test('刀掉唯一的神职不会立刻结束游戏', () => {
     s.deadline = Date.now() - 1;
     ww.applyAction(s, { type: 'tick' }, null);
 
-    assert.notStrictEqual(s.phase, 'ended', `${n} 人局:刀掉预言家后不该立即结束`);
+    assert.notStrictEqual(s.phase, 'ended', `${n}-player game: killing the seer should not end it immediately`);
   }
 });
 
-test('狼人数 ≥ 好人数 → 狼胜(已成定局,不必走流程)', () => {
+test('wolves >= good players → wolves win (the outcome is settled, no need to go through the motions)', () => {
   const s = nightState(8);
   const wolves = roleOf(s, 'wolf');
   const goods = s.players.map((p) => p.id).filter((id) => !wolves.includes(id));
-  // 留到只剩 (狼数) 个好人 —— 狼可以强行票死任何人
+  // Leave only (number of wolves) good players -- the wolves can force-vote anybody out
   goods.slice(wolves.length).forEach((id) => { s.alive[id] = false; });
 
-  // 从白天结算触发。夜晚会先经过女巫阶段,那是另一条路径,这里只关心胜负判定。
+  // Trigger it from the daytime resolution. The night would pass through the witch phase first, which is a different path; here we only care about the win check.
   s.phase = 'day'; s.votes = {}; s.deadline = Date.now() - 1;
   ww.applyAction(s, { type: 'tick' }, null);
   assert.strictEqual(s.phase, 'ended');
   assert.strictEqual(s.winner, 'wolf');
 });
 
-test('平民全灭 → 狼胜(屠民边仍然有效)', () => {
+test('all villagers wiped out → wolves win (the villager-side wipe still applies)', () => {
   const s = nightState(12);
   roleOf(s, 'villager').forEach((id) => { s.alive[id] = false; });
   s.phase = 'day'; s.votes = {}; s.deadline = Date.now() - 1;
   ww.applyAction(s, { type: 'tick' }, null);
-  assert.strictEqual(s.winner, 'wolf', '屠民边不受本次改动影响');
+  assert.strictEqual(s.winner, 'wolf', 'the villager-side wipe is unaffected by this change');
 });
 
-test('狼全出局 → 好人胜', () => {
+test('all wolves eliminated → the good side wins', () => {
   const s = nightState(6);
   roleOf(s, 'wolf').forEach((id) => { s.alive[id] = false; });
   s.deadline = Date.now() - 1;
@@ -184,39 +184,39 @@ test('狼全出局 → 好人胜', () => {
   assert.strictEqual(s.winner, 'good');
 });
 
-test('掉线不判负:唯一的狼掉线后好人不会自动获胜', () => {
+test('a disconnect is not a loss: the good side does not win automatically when the only wolf disconnects', () => {
   const s = nightState(6);
   const wolf = roleOf(s, 'wolf')[0];
   ww.removePlayer(s, wolf);
-  assert.notStrictEqual(s.phase, 'ended', '仅掉线不应结束游戏');
-  assert.strictEqual(s.alive[wolf], true, '掉线不等于出局');
+  assert.notStrictEqual(s.phase, 'ended', 'a mere disconnect should not end the game');
+  assert.strictEqual(s.alive[wolf], true, 'a disconnect is not an elimination');
 });
 
-test('宽限期后真正出局:唯一的狼退出 → 好人胜', () => {
+test('really eliminated after the grace period: the only wolf leaves → the good side wins', () => {
   const s = nightState(6);
   const wolf = roleOf(s, 'wolf')[0];
   ww.eliminatePlayer(s, wolf);
-  assert.strictEqual(s.phase, 'ended', '真出局后必须重跑胜负,否则好人永远赢不了');
+  assert.strictEqual(s.phase, 'ended', 'the win conditions must be re-run after a real elimination, otherwise the good side could never win');
   assert.strictEqual(s.winner, 'good');
 });
 
-// ── 夜晚结果的信息量 ──
+// ── How much the night result gives away ──
 
-test('对局中不下发 roles —— 死者身份不能随夜晚结果泄露', () => {
-  // 前端的遇害动画会显示死者的牌。它必须只在观战上帝视角下显示身份,
-  // 但服务端这一层也要守住:对局中任何玩家视图都不该出现 roles。
+test('roles are never sent out during a game -- a dead player\'s role must not leak with the night result', () => {
+  // The frontend's death animation shows the dead player's card. It must only show the role under the spectator god view,
+  // but this server layer has to hold the line as well: roles should never appear in any player's view during a game.
   const s = speechPhase();
   for (const p of s.players) {
     assert.strictEqual(
       ww.serializeStateFor(s, p.id).roles, undefined,
-      `${p.id} 在对局中拿到了 roles`
+      `${p.id} received roles during a game`
     );
   }
 });
 
-test('"被女巫救了"和"狼空刀"在玩家视图里必须完全一样', () => {
-  // 能区分的话就等于公开了女巫今晚有没有用解药,解药的价值直接归零。
-  // 前端的平安夜动画也因此只能说"无人倒牌",不能说"有人被救了"。
+test('"saved by the witch" and "the wolves made no kill" must look exactly the same in a player view', () => {
+  // Being able to tell them apart would reveal whether the witch used her healing potion tonight, and the healing potion's value would drop to zero.
+  // That is also why the frontend's peaceful-night animation can only say "nobody's card was turned over", never "somebody was saved".
   const mk = (useHeal) => {
     const s = ww.createInitialState(P(8), {});
     ww.applyAction(s, { type: 'start' }, s.hostId);
@@ -227,28 +227,28 @@ test('"被女巫救了"和"狼空刀"在玩家视图里必须完全一样', () =
     if (s.phase === 'night' && seer) {
       ww.applyAction(s, { type: 'seer_check', target: s.players.find((p) => p.id !== seer).id }, seer);
     }
-    // useHeal: 救下刀口 → 无人死;否则狼空刀的等价局面(也无人死)
+    // useHeal: save the kill target → nobody dies; otherwise the equivalent situation of the wolves making no kill (also nobody dies)
     ww.applyAction(s, useHeal ? { type: 'witch', heal: true } : { type: 'witch' }, roleOf(s, 'witch')[0]);
     return { s, victim };
   };
 
   const saved = mk(true);
-  assert.strictEqual(saved.s.alive[saved.victim], true, '前置条件:解药应救下刀口');
+  assert.strictEqual(saved.s.alive[saved.victim], true, 'precondition: the healing potion should save the kill target');
 
-  // 找一个既不是女巫也不是刀口的旁观者
+  // Find an observer who is neither the witch nor the kill target
   const observer = saved.s.players
     .map((p) => p.id)
     .find((id) => saved.s.roles[id] !== 'witch' && id !== saved.victim);
   const view = ww.serializeStateFor(saved.s, observer);
 
-  assert.strictEqual(view.lastNightVictim, null, '被救下时对外就是"无人死亡"');
-  assert.strictEqual(view.potions, undefined, '药瓶剩余量只能给女巫本人');
-  assert.strictEqual(view.witchVictim, undefined, '刀口只能给女巫本人');
+  assert.strictEqual(view.lastNightVictim, null, 'when someone is saved, the outside world just sees "nobody died"');
+  assert.strictEqual(view.potions, undefined, 'the remaining potions can only go to the witch herself');
+  assert.strictEqual(view.witchVictim, undefined, 'the kill target can only go to the witch herself');
 });
 
-test('夜晚死亡不带死因 —— 好人不能区分谁是刀口谁是被毒', () => {
-  // 前端的天亮播报因此必须对所有死者用同一个动画。给被毒的那张牌单独上绿色,
-  // 等于公开了女巫用没用毒、毒了谁,毒药的威慑就没了。
+test('night deaths carry no cause of death -- the good side cannot tell who was killed by wolves and who was poisoned', () => {
+  // This is why the frontend's dawn announcement must use the same animation for every dead player. Giving the poisoned card its own green treatment
+  // would reveal whether the witch used her poison and on whom, and the poison would lose its deterrent effect.
   const s = ww.createInitialState(P(8), {});
   ww.applyAction(s, { type: 'start' }, s.hostId);
   s.players.forEach((p) => ww.applyAction(s, { type: 'ready' }, p.id));
@@ -267,16 +267,16 @@ test('夜晚死亡不带死因 —— 好人不能区分谁是刀口谁是被毒
     .find((id) => s.alive[id] && s.roles[id] !== 'witch');
   const view = ww.serializeStateFor(s, observer);
 
-  assert.strictEqual(view.lastNightVictim.length, 2, '刀 + 毒应死两人');
-  // 死亡列表必须是一串纯 id,不带 cause/type 之类的死因标注
+  assert.strictEqual(view.lastNightVictim.length, 2, 'a kill + a poisoning should leave two dead');
+  // The death list must be a plain list of ids, with no cause/type or similar cause-of-death annotation
   for (const entry of view.lastNightVictim) {
-    assert.strictEqual(typeof entry, 'string', '死亡条目应是纯 id,不能带死因');
+    assert.strictEqual(typeof entry, 'string', 'a death entry should be a plain id, with no cause of death attached');
   }
 });
 
-// ── 房主配置(阶段时长) ──
+// ── Host config (phase durations) ──
 
-test('房主设置的阶段时长真的生效', () => {
+test('the phase durations set by the host really take effect', () => {
   const s = ww.createInitialState(P(8), { nightSeconds: 30, speechSeconds: 20, daySeconds: 30 });
   assert.strictEqual(s.cfg.nightSeconds, 30);
   assert.strictEqual(s.cfg.speechSeconds, 20);
@@ -284,12 +284,12 @@ test('房主设置的阶段时长真的生效', () => {
   ww.applyAction(s, { type: 'start' }, s.hostId);
   s.players.forEach((p) => ww.applyAction(s, { type: 'ready' }, p.id));
   const left = Math.round((s.deadline - Date.now()) / 1000);
-  assert.ok(Math.abs(left - 30) <= 1, `夜晚倒计时应用配置值,实际 ${left}s`);
+  assert.ok(Math.abs(left - 30) <= 1, `the night countdown should use the configured value, actual ${left}s`);
 });
 
-test('伪造的非法时长退回默认值', () => {
-  // 客户端可以伪造任意 config。0 秒会让阶段瞬间跳过,超大值会卡死整局,
-  // 所以取值必须在服务端按白名单校验,不能只靠前端限制。
+test('forged illegal durations fall back to the defaults', () => {
+  // The client can forge any config it likes. 0 seconds would make a phase get skipped instantly and a huge value would freeze the whole game,
+  // so the values have to be validated against a whitelist on the server and cannot rely on frontend restrictions alone.
   for (const bad of [
     { speechSeconds: 0 }, { speechSeconds: 99999 }, { daySeconds: 'abc' },
     { nightSeconds: -5 }, { pkSeconds: null }, { witchSeconds: 1e9 },
@@ -297,26 +297,26 @@ test('伪造的非法时长退回默认值', () => {
     const key = Object.keys(bad)[0];
     const s = ww.createInitialState(P(8), bad);
     const opts = ww.configSchema[key].options;
-    assert.ok(opts.includes(s.cfg[key]), `${key}=${JSON.stringify(bad[key])} 应退回白名单内的值`);
+    assert.ok(opts.includes(s.cfg[key]), `${key}=${JSON.stringify(bad[key])} should fall back to a value within the whitelist`);
   }
 });
 
-test('configSchema 的每一项都能被通用面板渲染', () => {
-  // 前端只认 toggle / options 两种;漏写 type 的项会静默不显示,房主根本改不到
+test('every item of configSchema can be rendered by the generic panel', () => {
+  // The frontend only recognizes toggle / options; an item with a missing type silently fails to show up and the host cannot change it at all
   for (const [key, item] of Object.entries(ww.configSchema)) {
-    assert.ok(['toggle', 'options'].includes(item.type), `${key} 的 type 无法渲染`);
-    assert.ok(item.label, `${key} 缺 label`);
-    assert.notStrictEqual(item.default, undefined, `${key} 缺 default`);
+    assert.ok(['toggle', 'options'].includes(item.type), `the type of ${key} cannot be rendered`);
+    assert.ok(item.label, `${key} is missing label`);
+    assert.notStrictEqual(item.default, undefined, `${key} is missing default`);
     if (item.type === 'options') {
-      assert.ok(Array.isArray(item.options) && item.options.length, `${key} 缺 options`);
-      assert.ok(item.options.includes(item.default), `${key} 的 default 不在 options 里`);
+      assert.ok(Array.isArray(item.options) && item.options.length, `${key} is missing options`);
+      assert.ok(item.options.includes(item.default), `the default of ${key} is not in options`);
     }
   }
 });
 
-// ── 轮流发言 ──
+// ── Taking turns to speak ──
 
-// 跑到白天发言阶段
+// Run the game up to the daytime speech phase
 function speechPhase(n = 8) {
   const s = ww.createInitialState(P(n), {});
   ww.applyAction(s, { type: 'start' }, s.hostId);
@@ -331,73 +331,73 @@ function speechPhase(n = 8) {
   return s;
 }
 
-test('夜晚结束后进入发言阶段,死者不在发言队列里', () => {
+test('after the night ends the game enters the speech phase, and the dead are not in the speaking queue', () => {
   const s = speechPhase();
-  assert.strictEqual(s.phase, 'speech', '天亮后应先轮流发言,而不是直接投票');
+  assert.strictEqual(s.phase, 'speech', 'at dawn players should take turns speaking first, rather than voting straight away');
   assert.ok(s.speechOrder.length > 0);
-  assert.ok(s.speechOrder.every((id) => s.alive[id]), '死者不该出现在发言队列');
+  assert.ok(s.speechOrder.every((id) => s.alive[id]), 'the dead should not appear in the speaking queue');
 });
 
-test('发言阶段只有当前发言人能说话', () => {
-  // 这是整个机制的核心:允许插话的话,狼刷屏就能把预言家的报点冲走。
+test('during the speech phase only the current speaker can talk', () => {
+  // This is the core of the whole mechanic: if interrupting were allowed, a wolf spamming could bury the seer's report.
   const s = speechPhase();
   const cur = s.speechOrder[s.speechIndex];
   const other = s.speechOrder.find((id) => id !== cur);
 
-  assert.ok(!ww.applyAction(s, { type: 'chat', text: '我是预言家' }, cur).error, '当前发言人应能说话');
-  assert.ok(ww.applyAction(s, { type: 'chat', text: '刷屏' }, other).error, '其他人不该能插话');
+  assert.ok(!ww.applyAction(s, { type: 'chat', text: 'I am the seer' }, cur).error, 'the current speaker should be able to talk');
+  assert.ok(ww.applyAction(s, { type: 'chat', text: 'spam' }, other).error, 'nobody else should be able to interrupt');
 });
 
-test('过麦轮到下一位,别人不能替你过', () => {
+test('passing the mic moves to the next player, and nobody can pass on your behalf', () => {
   const s = speechPhase();
   const cur = s.speechOrder[s.speechIndex];
   const other = s.speechOrder.find((id) => id !== cur);
 
-  assert.ok(ww.applyAction(s, { type: 'pass_speech' }, other).error, '不能替别人过麦');
+  assert.ok(ww.applyAction(s, { type: 'pass_speech' }, other).error, 'you cannot pass the mic on somebody else\'s behalf');
   ww.applyAction(s, { type: 'pass_speech' }, cur);
-  assert.strictEqual(s.speechOrder[s.speechIndex], s.speechOrder[1], '过麦后应轮到下一位');
+  assert.strictEqual(s.speechOrder[s.speechIndex], s.speechOrder[1], 'passing the mic should move on to the next player');
 });
 
-test('发言超时自动轮到下一位', () => {
+test('a speech timing out automatically moves to the next player', () => {
   const s = speechPhase();
   const before = s.speechIndex;
   s.deadline = Date.now() - 1;
   ww.applyAction(s, { type: 'tick' }, null);
-  assert.strictEqual(s.speechIndex, before + 1, '超时应换人,不能卡住');
+  assert.strictEqual(s.speechIndex, before + 1, 'a timeout should switch players, it must not get stuck');
 });
 
-test('全部发言完毕 → 进入投票,此时可自由讨论', () => {
+test('all speeches finished → move to the vote, where discussion is free', () => {
   const s = speechPhase();
   let guard = 0;
   while (s.phase === 'speech' && guard++ < 30) {
     ww.applyAction(s, { type: 'pass_speech' }, s.speechOrder[s.speechIndex]);
   }
-  assert.strictEqual(s.phase, 'day', '说完应进投票阶段');
+  assert.strictEqual(s.phase, 'day', 'once everyone has spoken it should move to the voting phase');
 
   const alive = s.players.map((p) => p.id).find((id) => s.alive[id]);
-  assert.ok(!ww.applyAction(s, { type: 'chat', text: '投票前再聊两句' }, alive).error,
-    '投票阶段应恢复自由讨论');
+  assert.ok(!ww.applyAction(s, { type: 'chat', text: 'a couple more words before we vote' }, alive).error,
+    'the voting phase should restore free discussion');
 });
 
-test('发言人掉线不会卡住全场', () => {
+test('a speaker disconnecting does not stall the whole table', () => {
   const s = speechPhase();
   const cur = s.speechOrder[s.speechIndex];
   ww.removePlayer(s, cur);
-  assert.notStrictEqual(s.speechOrder[s.speechIndex], cur, '发言人掉线应立即轮下一位');
+  assert.notStrictEqual(s.speechOrder[s.speechIndex], cur, 'a speaker disconnecting should immediately move to the next player');
 });
 
-test('死人频道不受发言顺序限制', () => {
-  // 死者在旁边聊天不影响场上发言,不该被"还没轮到你"挡住
+test('the dead channel is not bound by the speaking order', () => {
+  // Dead players chatting on the side does not affect the speeches in play, so they should not be blocked by "it is not your turn yet"
   const s = speechPhase();
   const dead = s.players.map((p) => p.id).find((id) => !s.alive[id]);
-  const r = ww.applyAction(s, { type: 'chat', text: '死人观战吐槽' }, dead);
-  assert.ok(!r.error, '死者任何时候都能在死人频道说话');
+  const r = ww.applyAction(s, { type: 'chat', text: 'dead player heckling from the sidelines' }, dead);
+  assert.ok(!r.error, 'dead players can talk in the dead channel at any time');
   assert.strictEqual(r.events[0].channel, 'dead');
 });
 
-// ── 女巫 ──
+// ── Witch ──
 
-// 造一个"狼刀已定、轮到女巫"的状态
+// Build a state where "the wolf kill is settled and it is the witch's turn"
 function witchTurn(n = 8) {
   const s = ww.createInitialState(P(n), {});
   ww.applyAction(s, { type: 'start' }, s.hostId);
@@ -414,46 +414,46 @@ function witchTurn(n = 8) {
 }
 const ROLE_VILLAGER = 'villager';
 
-test('女巫能看到今晚的刀口,别人看不到', () => {
+test('the witch can see tonight\'s kill target, nobody else can', () => {
   const { s, witch, victim } = witchTurn();
-  assert.strictEqual(s.phase, 'witch', '狼刀结算后应进入女巫阶段');
+  assert.strictEqual(s.phase, 'witch', 'after the wolf kill is resolved the game should enter the witch phase');
   assert.strictEqual(ww.serializeStateFor(s, witch).witchVictim, victim);
 
   for (const p of s.players) {
     if (p.id === witch) continue;
     assert.strictEqual(
       ww.serializeStateFor(s, p.id).witchVictim, undefined,
-      '刀口只能发给女巫 —— 发给别人等于公开今晚谁死'
+      'the kill target can only be sent to the witch -- sending it to anybody else would reveal who dies tonight'
     );
   }
 });
 
-test('解药救下刀口,毒药毒死目标,各自消耗', () => {
+test('the healing potion saves the kill target, the poison kills its target, and each is consumed', () => {
   let { s, witch, victim } = witchTurn();
   ww.applyAction(s, { type: 'witch', heal: true }, witch);
-  assert.strictEqual(s.alive[victim], true, '被救的人应存活');
-  assert.strictEqual(s.potions.heal, false, '解药应被消耗');
+  assert.strictEqual(s.alive[victim], true, 'the person who was saved should be alive');
+  assert.strictEqual(s.potions.heal, false, 'the healing potion should be consumed');
 
   ({ s, witch, victim } = witchTurn());
   const target = s.players.map((p) => p.id).find((id) => id !== witch && id !== victim && s.alive[id]);
   ww.applyAction(s, { type: 'witch', poison: target }, witch);
-  assert.strictEqual(s.alive[victim], false, '没救就该死');
-  assert.strictEqual(s.alive[target], false, '被毒的人应出局');
-  assert.strictEqual(s.potions.poison, false, '毒药应被消耗');
+  assert.strictEqual(s.alive[victim], false, 'without a save they should die');
+  assert.strictEqual(s.alive[target], false, 'the poisoned player should be eliminated');
+  assert.strictEqual(s.potions.poison, false, 'the poison should be consumed');
 });
 
-test('同一夜不能又救又毒;药用完不能再用', () => {
+test('you cannot both save and poison on the same night; a used-up potion cannot be used again', () => {
   let { s, witch, victim } = witchTurn();
   const other = s.players.map((p) => p.id).find((id) => id !== witch && id !== victim && s.alive[id]);
   assert.ok(ww.applyAction(s, { type: 'witch', heal: true, poison: other }, witch).error);
 
   ({ s, witch } = witchTurn());
   s.potions.heal = false;
-  assert.ok(ww.applyAction(s, { type: 'witch', heal: true }, witch).error, '解药用完不能再救');
+  assert.ok(ww.applyAction(s, { type: 'witch', heal: true }, witch).error, 'once the healing potion is used up it cannot save again');
 });
 
-test('首夜可以自救,之后不能', () => {
-  // 首夜:狼刀女巫,她可以救自己
+test('self-healing is allowed on the first night but not afterwards', () => {
+  // First night: the wolves kill the witch, and she can save herself
   const s1 = ww.createInitialState(P(8), {});
   ww.applyAction(s1, { type: 'start' }, s1.hostId);
   s1.players.forEach((p) => ww.applyAction(s1, { type: 'ready' }, p.id));
@@ -463,28 +463,28 @@ test('首夜可以自救,之后不能', () => {
   if (s1.phase === 'night' && se1) {
     ww.applyAction(s1, { type: 'seer_check', target: s1.players.find((p) => p.id !== se1).id }, se1);
   }
-  assert.ok(!ww.applyAction(s1, { type: 'witch', heal: true }, w1).error, '首夜应可自救');
+  assert.ok(!ww.applyAction(s1, { type: 'witch', heal: true }, w1).error, 'self-healing should be possible on the first night');
 
-  // 第二夜起不行
+  // Not from the second night onwards
   const { s, witch } = witchTurn();
   s.round = 2;
   s.nightActions.victim = witch;
-  assert.ok(ww.applyAction(s, { type: 'witch', heal: true }, witch).error, '首夜之后不能自救');
+  assert.ok(ww.applyAction(s, { type: 'witch', heal: true }, witch).error, 'self-healing is not allowed after the first night');
 });
 
-test('非女巫不能用药;女巫掉线不会卡住全场', () => {
+test('non-witches cannot use potions; a witch disconnecting does not stall the whole table', () => {
   const { s, witch, victim } = witchTurn();
   const other = s.players.map((p) => p.id).find((id) => id !== witch && s.alive[id]);
   assert.ok(ww.applyAction(s, { type: 'witch', heal: true }, other).error);
 
   ww.removePlayer(s, witch);
-  assert.notStrictEqual(s.phase, 'witch', '女巫掉线应视为跳过,否则全场干等到超时');
-  assert.strictEqual(s.alive[victim], false, '跳过后按原刀口结算');
+  assert.notStrictEqual(s.phase, 'witch', 'a witch disconnecting should count as a skip, otherwise everyone sits around until the timeout');
+  assert.strictEqual(s.alive[victim], false, 'after the skip it resolves with the original kill target');
 });
 
-// ── 猎人 ──
+// ── Hunter ──
 
-test('猎人被刀可以开枪带走一人,之后进白天', () => {
+test('a hunter killed by wolves can shoot and take one person with him, then the day begins', () => {
   const s = ww.createInitialState(P(12), {});
   ww.applyAction(s, { type: 'start' }, s.hostId);
   s.players.forEach((p) => ww.applyAction(s, { type: 'ready' }, p.id));
@@ -496,16 +496,16 @@ test('猎人被刀可以开枪带走一人,之后进白天', () => {
   }
   if (s.phase === 'witch') ww.applyAction(s, { type: 'witch' }, roleOf(s, 'witch')[0]);
 
-  assert.strictEqual(s.phase, 'hunter', '猎人出局应进入开枪阶段');
+  assert.strictEqual(s.phase, 'hunter', 'the hunter being eliminated should enter the shooting phase');
   assert.strictEqual(s.pendingHunter, hunter);
 
   const target = s.players.map((p) => p.id).find((id) => s.alive[id]);
   ww.applyAction(s, { type: 'hunter_shoot', target }, hunter);
-  assert.strictEqual(s.alive[target], false, '被开枪的人应出局');
-  assert.ok(s.phase !== 'hunter', '开枪后应离开该阶段');
+  assert.strictEqual(s.alive[target], false, 'the person who was shot should be eliminated');
+  assert.ok(s.phase !== 'hunter', 'after the shot the game should leave that phase');
 });
 
-test('猎人被毒死不能开枪', () => {
+test('a hunter poisoned to death cannot shoot', () => {
   const s = ww.createInitialState(P(12), {});
   ww.applyAction(s, { type: 'start' }, s.hostId);
   s.players.forEach((p) => ww.applyAction(s, { type: 'ready' }, p.id));
@@ -519,12 +519,12 @@ test('猎人被毒死不能开枪', () => {
   }
   ww.applyAction(s, { type: 'witch', poison: hunter }, witch);
 
-  assert.strictEqual(s.alive[hunter], false, '猎人应被毒死');
-  assert.notStrictEqual(s.phase, 'hunter', '被毒死的猎人不能开枪');
+  assert.strictEqual(s.alive[hunter], false, 'the hunter should be poisoned to death');
+  assert.notStrictEqual(s.phase, 'hunter', 'a hunter poisoned to death cannot shoot');
   assert.strictEqual(s.pendingHunter, null);
 });
 
-test('猎人被票出后开枪,再进夜晚', () => {
+test('a hunter voted out shoots, and then the night begins', () => {
   const s = ww.createInitialState(P(12), {});
   ww.applyAction(s, { type: 'start' }, s.hostId);
   s.players.forEach((p) => ww.applyAction(s, { type: 'ready' }, p.id));
@@ -538,13 +538,13 @@ test('猎人被票出后开枪,再进夜晚', () => {
   assert.strictEqual(s.phase, 'hunter');
   const target = s.players.map((p) => p.id).find((id) => s.alive[id]);
   ww.applyAction(s, { type: 'hunter_shoot', target }, hunter);
-  assert.strictEqual(s.phase, 'night', '白天票出的猎人开完枪应进夜晚');
+  assert.strictEqual(s.phase, 'night', 'a hunter voted out during the day should move to the night once his shot is done');
 });
 
-test('开枪前不泄露猎人瞄准了谁', () => {
-  // 瞄准过程必须只存在于猎人自己的浏览器里。要是为了做"瞄准动效"把中间状态
-  // 发上来,被瞄的人就能在扣扳机前抢先自辩,猎人的枪等于废了。
-  // 所以服务端在开枪前不该有任何指向目标的字段,log 里也不该有记录。
+test('who the hunter is aiming at is not leaked before the shot', () => {
+  // The aiming has to exist only inside the hunter's own browser. If the intermediate state were sent up in order to build an "aiming animation",
+  // the person being aimed at could get their defense in first, before the trigger is pulled, and the hunter's gun would be worthless.
+  // So before the shot the server should hold no field pointing at a target, and the log should hold no record of it either.
   const s = ww.createInitialState(P(12), {});
   ww.applyAction(s, { type: 'start' }, s.hostId);
   s.players.forEach((p) => ww.applyAction(s, { type: 'ready' }, p.id));
@@ -556,14 +556,14 @@ test('开枪前不泄露猎人瞄准了谁', () => {
 
   assert.ok(
     !(view.log || []).some((e) => e.type === 'hunter_shot'),
-    '还没开枪,log 里不该有开枪记录'
+    'the shot has not happened yet, so the log should hold no shot record'
   );
-  // pendingHunter 是公开的(大家都知道轮到猎人了),但不能有"目标"
+  // pendingHunter is public (everybody knows it is the hunter's turn), but there must be no "target"
   assert.strictEqual(view.hunterTarget, undefined);
   assert.strictEqual(view.aimingAt, undefined);
 });
 
-test('开枪后结果对所有人公开(动画据此播放)', () => {
+test('after the shot the result is public to everyone (the animation plays from it)', () => {
   const s = ww.createInitialState(P(12), {});
   ww.applyAction(s, { type: 'start' }, s.hostId);
   s.players.forEach((p) => ww.applyAction(s, { type: 'ready' }, p.id));
@@ -577,11 +577,11 @@ test('开枪后结果对所有人公开(动画据此播放)', () => {
   const observer = s.players.map((p) => p.id).find((id) => s.alive[id]);
   const shot = (ww.serializeStateFor(s, observer).log || [])
     .filter((e) => e.type === 'hunter_shot').pop();
-  assert.strictEqual(shot?.target, target, '开枪结果应写进公开日志');
+  assert.strictEqual(shot?.target, target, 'the result of the shot should be written into the public log');
   assert.strictEqual(s.alive[target], false);
 });
 
-test('非猎人不能开枪;超时视为放弃', () => {
+test('non-hunters cannot shoot; a timeout counts as declining', () => {
   const s = ww.createInitialState(P(12), {});
   ww.applyAction(s, { type: 'start' }, s.hostId);
   s.players.forEach((p) => ww.applyAction(s, { type: 'ready' }, p.id));
@@ -594,69 +594,69 @@ test('非猎人不能开枪;超时视为放弃', () => {
 
   s.deadline = Date.now() - 1;
   ww.applyAction(s, { type: 'tick' }, null);
-  assert.notStrictEqual(s.phase, 'hunter', '超时应自动离开开枪阶段');
+  assert.notStrictEqual(s.phase, 'hunter', 'a timeout should automatically leave the shooting phase');
 });
 
-// ── 神职数量与屠神边 ──
+// ── Number of gods and the god-side wipe ──
 
-test('神职按人数递进上场', () => {
+test('gods come into play progressively with the player count', () => {
   const gods = (n) => {
     const s = ww.createInitialState(P(n), {});
     return Object.values(s.roles).filter((r) => ['seer', 'witch', 'hunter'].includes(r)).length;
   };
-  assert.strictEqual(gods(6), 1, '小局只有预言家');
-  assert.strictEqual(gods(8), 2, '中局加女巫');
-  assert.strictEqual(gods(12), 3, '大局加猎人');
+  assert.strictEqual(gods(6), 1, 'a small game has only the seer');
+  assert.strictEqual(gods(8), 2, 'a medium game adds the witch');
+  assert.strictEqual(gods(12), 3, 'a large game adds the hunter');
 
-  // 每种神最多 1 个
+  // At most 1 of each kind of god
   const s = ww.createInitialState(P(12), {});
   for (const r of ['seer', 'witch', 'hunter']) {
-    assert.strictEqual(roleOf(s, r).length, 1, `${r} 应该只有 1 个`);
+    assert.strictEqual(roleOf(s, r).length, 1, `there should be only 1 ${r}`);
   }
 });
 
-test('神职 ≥ 2 时屠神边恢复生效', () => {
+test('the god-side wipe takes effect again once there are >= 2 gods', () => {
   const s = nightState(8);
   roleOf(s, 'seer').concat(roleOf(s, 'witch')).forEach((id) => { s.alive[id] = false; });
   s.deadline = Date.now() - 1;
   ww.applyAction(s, { type: 'tick' }, null);
-  assert.strictEqual(s.winner, 'wolf', '2 神时神全灭应判狼胜');
+  assert.strictEqual(s.winner, 'wolf', 'with 2 gods, wiping out all of them should count as a wolf win');
 });
 
-// ── 发言频道(死人频道不能被存活玩家看到,靠 channel 标记路由) ──
+// ── Chat channels (the dead channel must not be visible to living players, routed by the channel marker) ──
 
-test('死亡玩家发言进 dead 频道,存活玩家发言进 alive 频道', () => {
+test('dead players\' messages go to the dead channel, living players\' messages go to the alive channel', () => {
   const s = ww.createInitialState(P(6), {});
   s.phase = 'day'; s.votes = {}; s.deadline = Date.now() + 60_000;
   const [a, b] = s.players.map((p) => p.id);
   s.alive[b] = false;
 
-  const aliveEv = ww.applyAction(s, { type: 'chat', text: '我是预言家' }, a).events[0];
+  const aliveEv = ww.applyAction(s, { type: 'chat', text: 'I am the seer' }, a).events[0];
   assert.strictEqual(aliveEv.channel, 'alive');
 
-  const deadEv = ww.applyAction(s, { type: 'chat', text: '他是狼' }, b).events[0];
-  assert.strictEqual(deadEv.channel, 'dead', '死者发言必须标 dead,否则剧透给存活玩家');
+  const deadEv = ww.applyAction(s, { type: 'chat', text: 'he is a wolf' }, b).events[0];
+  assert.strictEqual(deadEv.channel, 'dead', 'a dead player\'s message must be marked dead, otherwise it spoils the game for living players');
 });
 
-test('夜晚存活玩家不能公开发言', () => {
+test('living players cannot speak publicly at night', () => {
   const s = nightState(6);
-  assert.ok(ww.applyAction(s, { type: 'chat', text: '天黑说话' }, s.players[0].id).error);
+  assert.ok(ww.applyAction(s, { type: 'chat', text: 'talking after dark' }, s.players[0].id).error);
 });
 
-test('观战者不能行动 —— 尤其不能发言', () => {
-  // 观战者不在 alive 表里,chat 分支会把他当成死人路由进死人频道。
-  // 房主开了上帝视角的观战者能看到所有身份,那就等于可以把全场身份播给所有死者。
+test('spectators cannot act -- above all they cannot chat', () => {
+  // A spectator is not in the alive table, so the chat branch would treat them as a dead player and route them into the dead channel.
+  // A spectator with the host's god view turned on can see every role, which would mean they could broadcast the whole table's roles to all the dead players.
   const s = nightState(6);
   s.phase = 'day'; s.votes = {}; s.deadline = Date.now() + 60_000;
 
-  assert.ok(ww.applyAction(s, { type: 'chat', text: '狼是p3' }, '__spectator__').error);
+  assert.ok(ww.applyAction(s, { type: 'chat', text: 'the wolf is p3' }, '__spectator__').error);
   assert.ok(ww.applyAction(s, { type: 'vote', target: s.players[0].id }, '__spectator__').error);
 
   s.phase = 'night';
   assert.ok(ww.applyAction(s, { type: 'wolf_kill', target: s.players[0].id }, '__spectator__').error);
 });
 
-test('tick 不受"必须是本局玩家"限制(服务端驱动,无行动者)', () => {
+test('tick is not subject to the "must be a player in this game" restriction (server-driven, with no actor)', () => {
   const s = nightState(6);
-  assert.ok(!ww.applyAction(s, { type: 'tick' }, null).error, 'tick 的 playerId 是 null,必须放行');
+  assert.ok(!ww.applyAction(s, { type: 'tick' }, null).error, 'tick has a playerId of null, so it must be let through');
 });

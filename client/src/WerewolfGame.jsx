@@ -1,31 +1,41 @@
 import { useEffect, useReducer, useRef, useState } from 'react';
 import RoleReveal from './RoleReveal';
 import { ui } from './ui';
+import { useT } from './i18n.jsx';
 
-// 狼人杀游戏界面(对局中)。
-// props: state(分角色视图), act(action=>void), me{id,name}, socket(ref,用于订阅聊天事件)
+// Werewolf game view (during a match).
+// props: state (role-specific view), act(action=>void), me{id,name}, socket (ref, used to subscribe to chat events)
 // state.phase: reveal | night | witch | hunter | speech | day | pk | ended
-//   speech = 轮流发言(只有 state.iAmSpeaking 的人能说);day = 投票;pk = 平票加赛
+//   speech = players speak in turn (only the one with state.iAmSpeaking may talk); day = voting; pk = tie-breaker round
 //
-// 动画的信息隔离约定:凡是"还没发生的选择"一律只存在于本地 state,不上报服务端 ——
-// 猎人的瞄准(HunterShot 的 aiming)、女巫的下毒目标(WitchActions 的 poisoned)都是如此。
-// 公开动画只用既成事实(lastNightVictim / lastVotedOut / log 里的 hunter_shot),
-// 且一夜多死时所有死者用同一个动画:死亡列表不带死因,区分它们就等于泄露女巫用没用毒。
-const ROLE_INFO = {
-  wolf: { emoji: '🐺', name: '狼人', desc: '夜晚与同伴一起猎杀一名玩家' },
-  seer: { emoji: '🔮', name: '预言家', desc: '每晚查验一名玩家的身份' },
-  witch: { emoji: '🧪', name: '女巫', desc: '解药救人、毒药毒人,各一瓶' },
-  hunter: { emoji: '🔫', name: '猎人', desc: '出局时可开枪带走一名玩家(被毒除外)' },
-  villager: { emoji: '👤', name: '平民', desc: '白天找出并投票放逐狼人' },
+// Information-hiding convention for animations: any "choice that has not happened yet" lives only in
+// local state and is never reported to the server -- this covers the hunter's aiming (the `aiming`
+// state in HunterShot) and the witch's poison target (the `poisoned` state in WitchActions).
+// Public animations only ever use accomplished facts (lastNightVictim / lastVotedOut / the hunter_shot
+// entry in the log), and when several players die in one night every victim gets the same animation:
+// the death list carries no cause of death, so telling the deaths apart would reveal whether the
+// witch used her poison.
+// Emoji are language-independent, so they stay in a module constant; names and descriptions are looked
+// up in the message catalog.
+const ROLE_EMOJI = {
+  wolf: '🐺', seer: '🔮', witch: '🧪', hunter: '🔫', villager: '👤',
+};
+// roleInfo(t, 'wolf') → { emoji, name, desc }; an unknown role falls back to villager,
+// consistent with the convention that the server only ever sends these five roles.
+const roleInfo = (t, role) => {
+  const key = ROLE_EMOJI[role] ? role : 'villager';
+  return { emoji: ROLE_EMOJI[key], name: t(`role.${key}`), desc: t(`role.${key}.desc`) };
 };
 
-// 倒计时:读 state.deadline(ms 时间戳),每 500ms 触发一次重渲染,剩余秒数由 deadline 现算。
-// 不把秒数存进 state —— 避免在 effect 里同步 setState。剩 10s 内变红 + 脉动,制造紧迫感。
+// Countdown: reads state.deadline (a ms timestamp), forces a re-render every 500ms, and computes the
+// remaining seconds from the deadline on the fly.
+// The seconds are deliberately not kept in state -- that avoids calling setState synchronously inside an
+// effect. Within the last 10s it turns red and pulses, to create a sense of urgency.
 function Countdown({ deadline }) {
   const [, forceTick] = useReducer((n) => n + 1, 0);
   const active = deadline != null;
   useEffect(() => {
-    if (!active) return;                     // 无 deadline 时不空转
+    if (!active) return;                     // don't spin an idle timer when there is no deadline
     const t = setInterval(forceTick, 500);
     return () => clearInterval(t);
   }, [active]);
@@ -47,50 +57,61 @@ function Countdown({ deadline }) {
 const remain = (deadline) => deadline == null ? 0 : Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
 
 export default function WerewolfGame({ state, act, me, socket }) {
+  const t = useT();
   const players = state.players || [];
-  const nameOf = (id) => players.find((p) => p.id === id)?.name || '玩家';
-  const role = ROLE_INFO[state.myRole] || ROLE_INFO.villager;
-  // 观战者不是本局玩家:既不算存活也不算出局,不显示"你已出局"之类的玩家态提示
+  const nameOf = (id) => players.find((p) => p.id === id)?.name || t('common.player');
+  const role = roleInfo(t, state.myRole);
+  // A spectator is not a player in this match: neither alive nor eliminated, so we never show
+  // player-state hints such as "you are out"
   const isSpectator = !!state.spectator;
   const iAmAlive = isSpectator ? null : state.alive;
   const alivePlayers = players.filter((p) => p.alive);
-  // 上帝视角(房主开启)下,观战者可见每个人的角色
+  // Under god view (enabled by the host), spectators can see everyone's role
   const godRoles = isSpectator && state.roles ? state.roles : null;
 
-  // ── 聊天/发言 ──(钩子必须在任何条件 return 之前)
-  // 订阅 chat 事件:channel='dead' 的死人频道消息只会发到死者/观战者(服务端已按频道路由)。
+  // ── Chat / speaking ── (hooks must come before any conditional return)
+  // Subscribe to chat events: messages on the dead channel (channel='dead') are only delivered to dead
+  // players and spectators (the server already routes by channel).
   const [messages, setMessages] = useState([]);
-  // 遇害动画:天亮进入发言阶段的那一刻放一次,放完就不再重复。
-  // 用 round 做键 —— 同一轮内的任何状态广播都不该重放动画。
+  // Death animation: played once at the moment day breaks and the speech phase starts, and never repeated.
+  // Keyed by round -- no state broadcast within the same round should replay the animation.
   const [slashRound, setSlashRound] = useState(null);
   const victims = Array.isArray(state.lastNightVictim)
     ? state.lastNightVictim
     : state.lastNightVictim ? [state.lastNightVictim] : [];
-  // 天亮时放一次夜晚结果动画。有人死 → 斜切;没人死 → 刀被挡下。
-  // 注意"平安夜"和"被女巫救了"在前端看起来必须完全一样 —— 服务端也确实
-  // 只发 lastNightVictim=null。能区分的话就等于泄露了女巫用没用解药。
+  // Play the night-result animation once at daybreak. Someone died → the slash; nobody died → the blade
+  // is blocked.
+  // Note that a "peaceful night" and "the witch healed someone" must look absolutely identical on the
+  // client -- and indeed the server only ever sends lastNightVictim=null in both cases. If the two could
+  // be told apart, that would reveal whether the witch used her healing potion.
   const showNightResult = state.phase === 'speech' && slashRound !== state.round;
   const showSlash = showNightResult && victims.length > 0;
   const showBlocked = showNightResult && victims.length === 0 && state.round > 0;
 
-  // 枪响动画:从公开日志里读最后一次开枪。log 本来就全房间可见,
-  // 不需要服务端为动画新加字段 —— 谁被带走了本就是既成事实。
+  // Gunshot animation: read the last shot out of the public log. The log is already visible to the whole
+  // room, so the server needs no extra field just for the animation -- who was taken out is an
+  // accomplished fact anyway.
   const log = state.log || [];
   const lastShot = [...log].reverse().find((e) => e.type === 'hunter_shot' && e.target);
   const shotKey = lastShot ? `${lastShot.playerId}->${lastShot.target}` : null;
   const [shownShot, setShownShot] = useState(null);
   const showGunshot = shotKey && shownShot !== shotKey;
 
-  // 放逐动画:天亮投票结算后进入下一夜时放一次。出局结果全场公开,无隐藏信息。
+  // Exile animation: played once when the daytime vote has been settled and the next night begins. The
+  // elimination result is public to the whole room, so there is no hidden information here.
   const [exiledRound, setExiledRound] = useState(null);
   const showExile = state.lastVotedOut && state.phase === 'night' && exiledRound !== state.round;
   const chatEndRef = useRef(null);
   const membersRef = useRef(players);
   useEffect(() => { membersRef.current = players; });
+  // The chat listener is only re-attached when the socket changes, so its closure would freeze whatever
+  // `t` was current at that moment; read the current one through a ref instead
+  const tRef = useRef(t);
+  useEffect(() => { tRef.current = t; }, [t]);
   useEffect(() => {
     const s = socket?.current;
     if (!s) return;
-    const nm = (id) => membersRef.current.find((p) => p.id === id)?.name || '玩家';
+    const nm = (id) => membersRef.current.find((p) => p.id === id)?.name || tRef.current('common.player');
     const onChat = ({ playerId, text, channel }) =>
       setMessages((m) => [...m.slice(-60), { id: Math.random(), name: nm(playerId), text, channel }]);
     s.on('chat', onChat);
@@ -98,8 +119,9 @@ export default function WerewolfGame({ state, act, me, socket }) {
   }, [socket]);
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
 
-  // 身份序幕:仅在服务端 reveal 阶段显示(此阶段夜晚尚未计时)。
-  // 点"进入游戏"→ 发 ready;等所有存活玩家就绪(或宽限超时),服务端推进到 night,序幕自然消失。
+  // Role reveal prologue: only shown during the server's reveal phase (the night clock has not started yet).
+  // Clicking "enter game" sends ready; once every living player is ready (or the grace period expires) the
+  // server advances to night and the prologue disappears on its own.
   if (state.phase === 'reveal' && state.myRole) {
     return (
       <RoleReveal
@@ -112,59 +134,67 @@ export default function WerewolfGame({ state, act, me, socket }) {
     );
   }
 
-  // 结束
+  // Game over
   if (state.phase === 'ended') {
     return (
       <div>
         <div style={{ ...ui.card, textAlign: 'center' }}>
           <h2 style={{ marginBottom: 8 }}>
-            {state.winner === 'wolf' ? '🐺 狼人阵营胜利' : '🏡 好人阵营胜利'}
+            {state.winner === 'wolf' ? t('wolf.winWolf') : t('wolf.winVillage')}
           </h2>
         </div>
         <div style={ui.card}>
-          <label style={ui.label}>身份公开</label>
-          {players.map((p) => (
-            <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0' }}>
-              <span>{p.name}{p.id === me.id ? ' (你)' : ''}</span>
-              <span>{ROLE_INFO[state.roles?.[p.id]]?.emoji} {ROLE_INFO[state.roles?.[p.id]]?.name}</span>
-            </div>
-          ))}
+          <label style={ui.label}>{t('wolf.rolesRevealed')}</label>
+          {players.map((p) => {
+            const r = state.roles?.[p.id];
+            const info = r ? roleInfo(t, r) : null;
+            return (
+              <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0' }}>
+                <span>{p.name}{p.id === me.id ? t('common.you') : ''}</span>
+                <span>{info ? `${info.emoji} ${info.name}` : ''}</span>
+              </div>
+            );
+          })}
         </div>
       </div>
     );
   }
 
-  const phaseLabel = {
-    night: '🌙 夜晚', speech: '🎤 轮流发言', day: '☀️ 投票放逐', pk: '⚔️ 平票 PK',
-    witch: '🧪 女巫用药', hunter: '🔫 猎人开枪',
-  }[state.phase] || state.phase;
+  const phaseKey = ['night', 'speech', 'day', 'pk', 'witch', 'hunter'].includes(state.phase)
+    ? `wolf.phase.${state.phase}` : null;
+  const phaseLabel = phaseKey ? t(phaseKey) : state.phase;
 
   return (
     <div>
-      {/* 状态条 */}
+      {/* Status bar */}
       <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 12, flexWrap: 'wrap' }}>
-        <span style={ui.badge}>第 {state.round} 天</span>
+        <span style={ui.badge}>{t('wolf.day', { n: state.round })}</span>
         <span style={ui.badge}>{phaseLabel}</span>
         <Countdown deadline={state.deadline} />
         {isSpectator ? (
-          <span style={ui.badge}>👀 观战{state.spectatorGodView ? ' · 上帝视角' : ''}</span>
+          <span style={ui.badge}>
+            {t('wolf.spectator', { god: state.spectatorGodView ? t('room.godView') : '' })}
+          </span>
         ) : (
           <span style={{ ...ui.badge, background: iAmAlive ? 'var(--surface-2)' : 'var(--danger)' }}>
-            {role.emoji} 你是{role.name}{iAmAlive ? '' : ' · 已出局'}
+            {t('wolf.youAre', {
+              emoji: role.emoji, role: role.name, dead: iAmAlive ? '' : t('wolf.dead'),
+            })}
           </span>
         )}
       </div>
 
       <div className="game-layout" style={{ '--side': '220px' }}>
-        {/* 左:主区(角色行动 / 讨论 / 投票);窄屏下降级为单栏,侧栏落到下方 */}
+        {/* Left: main area (role actions / discussion / voting); on narrow screens it degrades to a
+            single column and the sidebar drops below */}
         <div style={ui.card}>
-          {/* 我的身份卡(观战者没有身份,显示观战说明) */}
+          {/* My role card (spectators have no role, so they get the spectating blurb instead) */}
           <div style={{ marginBottom: 14, padding: 12, borderRadius: 10, background: 'var(--surface-2)' }}>
             {isSpectator ? (
               <>
-                <div style={{ fontWeight: 800, marginBottom: 4 }}>👀 观战中</div>
+                <div style={{ fontWeight: 800, marginBottom: 4 }}>{t('wolf.spectatingTitle')}</div>
                 <div style={{ fontSize: 13, color: 'var(--muted)' }}>
-                  你不参与本局{state.spectatorGodView ? ',房主已开启上帝视角,右侧可见所有身份' : ',仅可见公开信息'}
+                  {state.spectatorGodView ? t('wolf.spectatingGod') : t('wolf.spectatingNormal')}
                 </div>
               </>
             ) : (
@@ -174,118 +204,134 @@ export default function WerewolfGame({ state, act, me, socket }) {
             {state.myRole === 'wolf' && state.wolfTeammates && (
               <div style={{ fontSize: 13, marginTop: 6, color: 'var(--danger)' }}>
                 {state.wolfTeammates.length > 0
-                  ? `🐺 狼队友:${state.wolfTeammates.map(nameOf).join('、')}`
-                  : '🐺 你是唯一的狼'}
+                  ? t('wolf.teammates', { names: state.wolfTeammates.map(nameOf).join(t('common.listSep')) })
+                  : t('wolf.loneWolf')}
               </div>
             )}
             {state.myRole === 'seer' && state.seerResults && Object.keys(state.seerResults).length > 0 && (
               <div style={{ fontSize: 13, marginTop: 6 }}>
-                🔮 查验记录:{Object.entries(state.seerResults).map(([id, r]) =>
-                  `${nameOf(id)}=${r === 'wolf' ? '狼人❌' : '好人✅'}`).join('、')}
+                {t('wolf.seerLog', {
+                  results: Object.entries(state.seerResults).map(([id, r]) =>
+                    `${nameOf(id)}=${r === 'wolf' ? t('wolf.isWolf') : t('wolf.isGood')}`
+                  ).join(t('common.listSep')),
+                })}
               </div>
             )}
             {state.myRole === 'witch' && state.potions && (
               <div style={{ fontSize: 13, marginTop: 6 }}>
-                🧪 解药 {state.potions.heal ? '✅' : '❌'} · 毒药 {state.potions.poison ? '✅' : '❌'}
+                {t('wolf.potions', {
+                  heal: state.potions.heal ? '✅' : '❌',
+                  poison: state.potions.poison ? '✅' : '❌',
+                })}
               </div>
             )}
             {state.myRole === 'hunter' && (
               <div style={{ fontSize: 13, marginTop: 6 }}>
-                🔫 {state.hunterCanShoot ? '枪已上膛(出局时可开枪,被毒除外)' : '枪已用过'}
+                {state.hunterCanShoot ? t('wolf.gunLoaded') : t('wolf.gunUsed')}
               </div>
             )}
               </>
             )}
           </div>
 
-          {/* 遇害动画:天亮那一刻放一次。所有人都该看到(包括观战者和死者),
-              这是公开的夜晚结果,不是分角色信息。 */}
+          {/* Death animation: played once at the moment day breaks. Everyone should see it (spectators
+              and dead players included) -- this is the public night result, not role-specific
+              information. */}
           {showSlash && (
             <div style={{ marginBottom: 12 }}>
               {victims.map((id) => (
                 <SlashReveal key={id} name={nameOf(id)}
-                  // 只在观战上帝视角下显示身份。不要写成 state.roles?.[id] ——
-                  // 那样一旦服务端将来在对局中下发 roles(比如为了某个新功能),
-                  // 这里就会跟着把死者身份暴露给全场,而且没有任何东西会报错。
-                  // 显示什么由"我有没有资格看"决定,不由"字段在不在"决定。
+                  // Only show the role under the spectator god view. Do NOT write this as
+                  // state.roles?.[id] -- if the server ever starts sending roles during a match (say,
+                  // for some new feature), that form would immediately start exposing dead players'
+                  // roles to the whole room, and nothing would raise an error about it.
+                  // What gets displayed must be decided by "am I entitled to see this", not by
+                  // "does the field happen to be present".
                   role={godRoles?.[id]}
+                  t={t}
                   onDone={() => setSlashRound(state.round)} />
               ))}
               <p style={{ textAlign: 'center', color: 'var(--danger)', fontWeight: 700 }}>
-                🔪 {victims.map(nameOf).join('、')} 倒牌了
+                {t('wolf.killed', { names: victims.map(nameOf).join(t('common.listSep')) })}
               </p>
             </div>
           )}
 
-          {/* 平安夜:刀被挡下。文案刻意只说"无人倒牌",不区分空刀还是被救 ——
-              区分的话就暴露了女巫有没有用解药。 */}
+          {/* Peaceful night: the blade is blocked. The wording deliberately says only "nobody went down"
+              and does not distinguish between the wolves not killing anyone and the victim being healed
+              -- distinguishing the two would reveal whether the witch used her healing potion. */}
           {showBlocked && (
             <div style={{ marginBottom: 12 }}>
-              <BlockedReveal onDone={() => setSlashRound(state.round)} />
+              <BlockedReveal t={t} onDone={() => setSlashRound(state.round)} />
               <p style={{ textAlign: 'center', color: 'var(--accent)', fontWeight: 700 }}>
-                🛡️ 昨晚是平安夜
+                {t('wolf.peacefulNight')}
               </p>
             </div>
           )}
 
-          {/* 放逐:票堆压垮牌面。全场公开信息。 */}
+          {/* Exile: a pile of votes crushes the card. Public information for the whole room. */}
           {showExile && (
             <div style={{ marginBottom: 12 }}>
               <ExileReveal name={nameOf(state.lastVotedOut)}
                 onDone={() => setExiledRound(state.round)} />
               <p style={{ textAlign: 'center', color: 'var(--danger)', fontWeight: 700 }}>
-                🗳️ {nameOf(state.lastVotedOut)} 被放逐了
+                {t('wolf.exiled', { name: nameOf(state.lastVotedOut) })}
               </p>
             </div>
           )}
 
-          {/* 枪响:开完枪后放一次。打的是既成事实,全场可见。 */}
+          {/* Gunshot: played once after the shot has been fired. It depicts an accomplished fact and is
+              visible to the whole room. */}
           {showGunshot && (
             <div style={{ marginBottom: 12 }}>
               <GunshotReveal name={nameOf(lastShot.target)}
                 onDone={() => setShownShot(shotKey)} />
               <p style={{ textAlign: 'center', color: 'var(--danger)', fontWeight: 700 }}>
-                🔫 {nameOf(lastShot.playerId)} 开枪带走了 {nameOf(lastShot.target)}
+                {t('wolf.shotTook', {
+                  shooter: nameOf(lastShot.playerId), target: nameOf(lastShot.target),
+                })}
               </p>
             </div>
           )}
 
-          {/* 行动区。猎人的开枪要放在"已出局"判断之前 —— 他正是因为死了才要开枪。 */}
+          {/* Action area. The hunter's shot must be checked before the "already eliminated" branch --
+              he is shooting precisely because he died. */}
           {isSpectator ? (
-            <p style={{ color: 'var(--muted)', textAlign: 'center' }}>👀 观战中,无法参与行动</p>
+            <p style={{ color: 'var(--muted)', textAlign: 'center' }}>{t('wolf.noActionSpectator')}</p>
           ) : state.phase === 'hunter' ? (
-            <HunterShot state={state} act={act} nameOf={nameOf} alivePlayers={alivePlayers} />
+            <HunterShot state={state} act={act} nameOf={nameOf} alivePlayers={alivePlayers} t={t} />
           ) : !iAmAlive ? (
-            <p style={{ color: 'var(--muted)', textAlign: 'center' }}>你已出局,静静观战…</p>
+            <p style={{ color: 'var(--muted)', textAlign: 'center' }}>{t('wolf.deadWatching')}</p>
           ) : state.phase === 'speech' ? (
-            <SpeechTurn state={state} act={act} nameOf={nameOf} />
+            <SpeechTurn state={state} act={act} nameOf={nameOf} t={t} />
           ) : state.phase === 'witch' ? (
-            <WitchActions state={state} act={act} nameOf={nameOf} alivePlayers={alivePlayers} />
+            <WitchActions state={state} act={act} nameOf={nameOf} alivePlayers={alivePlayers} t={t} />
           ) : state.phase === 'night' ? (
-            <NightActions state={state} act={act} me={me} alivePlayers={alivePlayers} />
+            <NightActions state={state} act={act} me={me} alivePlayers={alivePlayers} t={t} />
           ) : state.phase === 'day' ? (
-            <DayVote state={state} act={act} me={me} alivePlayers={alivePlayers} nameOf={nameOf} />
+            <DayVote state={state} act={act} me={me} alivePlayers={alivePlayers} nameOf={nameOf} t={t} />
           ) : state.phase === 'pk' ? (
-            <PkVote state={state} act={act} nameOf={nameOf} />
+            <PkVote state={state} act={act} nameOf={nameOf} t={t} />
           ) : null}
 
-          {/* 讨论区:存活者白天/PK 可公开发言;死者/观战者走死人频道。夜晚存活者禁言。 */}
+          {/* Discussion area: living players may speak publicly during the day and PK phases; dead
+              players and spectators use the dead channel. Living players are muted at night. */}
           <ChatPanel
             state={state} act={act} messages={messages} chatEndRef={chatEndRef}
-            isSpectator={isSpectator} iAmAlive={iAmAlive}
+            isSpectator={isSpectator} iAmAlive={iAmAlive} t={t}
           />
         </div>
 
-        {/* 右:玩家列表 */}
+        {/* Right: player list */}
         <div style={{ ...ui.card, marginBottom: 0, padding: 12 }}>
-          <label style={ui.label}>玩家 ({alivePlayers.length} 存活)</label>
+          <label style={ui.label}>{t('wolf.aliveCount', { n: alivePlayers.length })}</label>
           {players.map((p) => (
             <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 14, padding: '4px 0',
               color: p.alive ? 'var(--text)' : 'var(--muted)', textDecoration: p.alive ? 'none' : 'line-through' }}>
-              <span>{p.alive ? '🙂' : '💀'} {p.name}{p.id === me.id ? ' (你)' : ''}</span>
+              <span>{p.alive ? '🙂' : '💀'} {p.name}{p.id === me.id ? t('common.you') : ''}</span>
               {godRoles?.[p.id] && (
                 <span style={{ color: 'var(--accent)', fontSize: 13 }}>
-                  {ROLE_INFO[godRoles[p.id]]?.emoji} {ROLE_INFO[godRoles[p.id]]?.name}
+                  {roleInfo(t, godRoles[p.id]).emoji} {roleInfo(t, godRoles[p.id]).name}
                 </span>
               )}
             </div>
@@ -296,20 +342,24 @@ export default function WerewolfGame({ state, act, me, socket }) {
   );
 }
 
-// 夜里可能死多个人(狼刀 + 女巫毒),所以 lastNightVictim 是数组。
-// 早期版本它是单个 id,直接丢给 nameOf 会得到"玩家",看不出是谁死了。
-function victimNames(victim, nameOf) {
+// Several players can die in one night (the wolves' kill plus the witch's poison), which is why
+// lastNightVictim is an array.
+// In an earlier version it was a single id; passing the array straight to nameOf would yield the generic
+// "player" label and you could not tell who actually died.
+function victimNames(victim, nameOf, t) {
   const ids = Array.isArray(victim) ? victim : victim ? [victim] : [];
   if (!ids.length) return null;
-  return `昨晚 ${ids.map(nameOf).join('、')} 遇害了`;
+  return t('wolf.victimsLastNight', { names: ids.map(nameOf).join(t('common.listSep')) });
 }
 
-// 遇害动画:匕首斜划过牌面,牌被切成两半错开滑落。
-// 纯 CSS + clip-path —— 上下两半是同一张牌渲染两遍,各自裁掉一半,
-// 然后往相反方向滑走。不需要任何动画库。
+// Death animation: a dagger slashes diagonally across the card, which is cut in two halves that slide
+// apart.
+// Pure CSS plus clip-path -- the top and bottom halves are the same card rendered twice, each clipped to
+// one half, then sliding away in opposite directions. No animation library needed.
 //
-// 尊重 prefers-reduced-motion:关掉动效的用户直接看到结果,不做切割动画。
-function SlashReveal({ name, role, onDone }) {
+// Respects prefers-reduced-motion: users who have turned motion off see the result directly, with no
+// cutting animation.
+function SlashReveal({ name, role, onDone, t }) {
   const [stage, setStage] = useState('idle');   // idle → slash → split → done
   useEffect(() => {
     const t1 = setTimeout(() => setStage('slash'), 200);
@@ -319,9 +369,11 @@ function SlashReveal({ name, role, onDone }) {
   }, [onDone]);
 
   if (stage === 'done') return null;
-  const info = ROLE_INFO[role];
+  // `role` only has a value under the spectator god view; without it we simply omit the role line
+  // (see the explanation at the call site)
+  const info = role ? roleInfo(t, role) : null;
 
-  // 牌面内容(上下半各渲染一次)
+  // The card face (rendered once for each half)
   const face = (
     <div style={{
       display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
@@ -337,7 +389,7 @@ function SlashReveal({ name, role, onDone }) {
   const split = stage === 'split';
   const half = (which) => ({
     position: 'absolute', inset: 0,
-    // 沿对角线裁切:上半保留左上,下半保留右下
+    // Clip along the diagonal: the top half keeps the upper left, the bottom half the lower right
     clipPath: which === 'top'
       ? 'polygon(0 0, 100% 0, 100% 38%, 0 74%)'
       : 'polygon(0 74%, 100% 38%, 100% 100%, 0 100%)',
@@ -354,7 +406,7 @@ function SlashReveal({ name, role, onDone }) {
     }}>
       <div style={half('top')}>{face}</div>
       <div style={half('bottom')}>{face}</div>
-      {/* 刀光:一道细白光沿对角线扫过 */}
+      {/* Blade glint: a thin white flash sweeping along the diagonal */}
       {stage !== 'idle' && (
         <div className="slash-blade" style={{
           position: 'absolute', inset: -20, pointerEvents: 'none',
@@ -365,12 +417,13 @@ function SlashReveal({ name, role, onDone }) {
   );
 }
 
-// 平安夜:刀光斜劈下来,撞上一面盾牌弹开、碎裂。
+// Peaceful night: the blade comes down diagonally, hits a shield, and is deflected and shattered.
 //
-// 这个动画对"狼空刀"和"女巫用解药救了人"必须表现得一模一样 —— 服务端
-// 本来就只发 lastNightVictim=null,前端要是能区分,就等于告诉所有人
-// 女巫今晚用没用药,解药的价值直接归零。
-function BlockedReveal({ onDone }) {
+// This animation must look exactly the same whether the wolves killed nobody or the witch healed the
+// victim -- the server already only sends lastNightVictim=null in both cases, and if the client could
+// tell them apart it would be telling everyone whether the witch used a potion tonight, which would
+// reduce the healing potion's value to nothing.
+function BlockedReveal({ onDone, t }) {
   const [stage, setStage] = useState('idle');   // idle → clash → done
   useEffect(() => {
     const t1 = setTimeout(() => setStage('clash'), 200);
@@ -389,16 +442,16 @@ function BlockedReveal({ onDone }) {
         background: 'var(--surface-2)', border: '2px solid var(--accent)', borderRadius: 12,
       }}>
         <div style={{ fontSize: 38 }}>🛡️</div>
-        <div style={{ fontWeight: 800, fontSize: 16 }}>无人倒牌</div>
+        <div style={{ fontWeight: 800, fontSize: 16 }}>{t('wolf.noOneDown')}</div>
       </div>
-      {/* 刀光斜劈下来,到中途被挡住(只扫一半就停) */}
+      {/* The blade comes down diagonally and is blocked halfway (the sweep stops at the midpoint) */}
       {clash && (
         <div className="block-blade" style={{
           position: 'absolute', inset: -20, pointerEvents: 'none',
           background: 'linear-gradient(108deg, transparent 44%, #fff 49%, #d9e6ff 50%, transparent 56%)',
         }} />
       )}
-      {/* 撞击迸出的火花 */}
+      {/* The spark thrown off by the impact */}
       {clash && <div className="block-spark" style={{
         position: 'absolute', left: '50%', top: '50%', width: 10, height: 10,
         marginLeft: -5, marginTop: -5, borderRadius: '50%',
@@ -409,8 +462,9 @@ function BlockedReveal({ onDone }) {
   );
 }
 
-// 投票出局:一叠票从上方砸下,把牌压垮。
-// 出局结果本来就是全场公开的(lastVotedOut 发给所有人),没有隐藏信息。
+// Voted out: a stack of ballots slams down from above and crushes the card.
+// The elimination result is public to the whole room anyway (lastVotedOut is sent to everyone), so there
+// is no hidden information here.
 function ExileReveal({ name, onDone }) {
   const [stage, setStage] = useState('idle');   // idle → drop → crush → done
   useEffect(() => {
@@ -438,7 +492,7 @@ function ExileReveal({ name, onDone }) {
         <div style={{ fontSize: 34 }}>🗳️</div>
         <div style={{ fontWeight: 800, fontSize: 16 }}>{name}</div>
       </div>
-      {/* 票堆:从上方砸下 */}
+      {/* The ballot stack: slamming down from above */}
       {stage !== 'idle' && (
         <div className="exile-votes" style={{
           position: 'absolute', left: '50%', top: 0, marginLeft: -34,
@@ -449,12 +503,14 @@ function ExileReveal({ name, onDone }) {
   );
 }
 
-// 毒药生效:绿色从中心浸染开来,牌面渐渐枯萎。
+// The poison takes effect: green seeps outward from the center and the card slowly withers.
 //
-// 只给女巫本人播。天亮后的公开播报里,被毒和被刀用的是同一个斩切动画 ——
-// lastNightVictim 是个不带死因的数组,好人本就无法区分谁是刀口谁是毒。
-// 给被毒者单独上绿色,等于把女巫用没用毒、毒了谁全公开,毒药就废了。
-function PoisonReveal({ name, onDone }) {
+// Played for the witch herself only. In the public announcement at daybreak, a poisoned player and a
+// knifed player get the very same slash animation -- lastNightVictim is an array that carries no cause
+// of death, so the villagers genuinely cannot tell who was knifed and who was poisoned.
+// Giving the poisoned player their own green treatment would make public both whether the witch used her
+// poison and whom she poisoned, which would render the poison useless.
+function PoisonReveal({ name, onDone, t }) {
   const [stage, setStage] = useState('idle');
   useEffect(() => {
     const t1 = setTimeout(() => setStage('seep'), 120);
@@ -475,7 +531,7 @@ function PoisonReveal({ name, onDone }) {
       }}>
         <div style={{ fontSize: 38 }}>☠️</div>
         <div style={{ fontWeight: 800, fontSize: 17 }}>{name}</div>
-        <div style={{ fontSize: 12, color: 'var(--muted)' }}>毒药已生效</div>
+        <div style={{ fontSize: 12, color: 'var(--muted)' }}>{t('wolf.poisonTook')}</div>
       </div>
       {stage === 'seep' && (
         <div className="poison-seep" style={{
@@ -488,10 +544,12 @@ function PoisonReveal({ name, onDone }) {
   );
 }
 
-// 枪响:枪口闪光 + 目标牌被击中震颤后倒下。
+// Gunshot: a muzzle flash, then the target card is hit, shudders and falls.
 //
-// 只在"已经开完枪"时播 —— 打的是既成事实(谁被带走了是公开信息)。
-// 瞄准过程绝不播动画:那会在扣扳机前就暴露枪口指向谁。
+// Only played once the shot has already been fired -- it depicts an accomplished fact (who was taken out
+// is public information).
+// The aiming process is never animated: doing so would reveal where the muzzle is pointing before the
+// trigger is even pulled.
 function GunshotReveal({ name, onDone }) {
   const [stage, setStage] = useState('idle');   // idle → fire → fall → done
   useEffect(() => {
@@ -517,7 +575,7 @@ function GunshotReveal({ name, onDone }) {
         <div style={{ fontSize: 38 }}>🎯</div>
         <div style={{ fontWeight: 800, fontSize: 17 }}>{name}</div>
       </div>
-      {/* 枪口闪光:从中心炸开的一团白光 */}
+      {/* Muzzle flash: a burst of white light exploding from the center */}
       {stage === 'fire' && (
         <div className="gun-flash" style={{
           position: 'absolute', left: '50%', top: '50%', width: 16, height: 16,
@@ -529,22 +587,24 @@ function GunshotReveal({ name, onDone }) {
   );
 }
 
-// 轮流发言。一次只有一个人能说,其余人只能看 —— 这样狼没法靠刷屏
-// 把预言家的报点冲走。轮到自己时用下方的聊天框发言,说完点"过"。
-function SpeechTurn({ state, act, nameOf }) {
+// Speaking in turn. Only one player may speak at a time and everyone else can only watch -- this stops
+// the wolves from flooding the chat to bury the seer's report. When it is your turn you speak through the
+// chat box below and click "pass" when you are done.
+function SpeechTurn({ state, act, nameOf, t }) {
   const order = state.speechOrder || [];
   const cur = state.currentSpeaker;
 
   return (
     <div>
       <p style={{ marginBottom: 10, fontWeight: 700, textAlign: 'center' }}>
-        {state.iAmSpeaking ? '🎤 轮到你发言了' : `🎤 ${nameOf(cur)} 正在发言`}
+        {state.iAmSpeaking ? t('speech.yourTurn') : t('speech.othersTurn', { name: nameOf(cur) })}
       </p>
       <div style={{ fontSize: 13, color: 'var(--muted)', textAlign: 'center', marginBottom: 10 }}>
-        第 {(state.spokenCount ?? 0) + 1} / {state.speechTotal} 位
+        {t('speech.position', { n: (state.spokenCount ?? 0) + 1, total: state.speechTotal })}
       </div>
 
-      {/* 发言顺序一览:已说过的变淡,当前的高亮 */}
+      {/* Overview of the speaking order: those who have already spoken fade out, the current one is
+          highlighted */}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, justifyContent: 'center', marginBottom: 10 }}>
         {order.map((id, i) => (
           <span key={id} style={{
@@ -559,41 +619,44 @@ function SpeechTurn({ state, act, nameOf }) {
       {state.iAmSpeaking ? (
         <>
           <p style={{ fontSize: 13, color: 'var(--muted)', textAlign: 'center', marginBottom: 8 }}>
-            在下方聊天框发言,说完点"过"
+            {t('speech.useChat')}
           </p>
           <button style={{ ...ui.btnAccent, width: '100%' }}
-            onClick={() => act({ type: 'pass_speech' })}>过(结束发言)</button>
+            onClick={() => act({ type: 'pass_speech' })}>{t('speech.pass')}</button>
         </>
       ) : (
-        <WaitHint text="其他人发言中,请等待…" />
+        <WaitHint text={t('speech.waiting')} />
       )}
     </div>
   );
 }
 
-// 女巫用药。服务端在狼刀结算后单独开一段给她,因为她要先看到刀口才能决定。
-// 刀口(state.witchVictim)只会下发给女巫本人。
-function WitchActions({ state, act, nameOf, alivePlayers }) {
-  const [mode, setMode] = useState(null);   // null | 'poison'(选毒药目标中)
-  // 刚下毒的目标,仅用于给女巫本人播一次浸染反馈。纯本地 —— 死因绝不外发:
-  // lastNightVictim 是个不带死因的数组,好人无法区分谁是刀口谁是毒,
-  // 给被毒者单独上绿色就等于把这个区分公开了。
+// The witch uses her potions. The server gives her a separate phase after the wolves' kill has been
+// settled, because she has to see the victim before she can decide.
+// The victim (state.witchVictim) is only ever sent to the witch herself.
+function WitchActions({ state, act, nameOf, alivePlayers, t }) {
+  const [mode, setMode] = useState(null);   // null | 'poison' (currently choosing a poison target)
+  // The player just poisoned, used only to play the seeping feedback once for the witch herself. Purely
+  // local -- the cause of death is never sent outward: lastNightVictim is an array with no cause of
+  // death, so the villagers cannot tell who was knifed and who was poisoned, and giving the poisoned
+  // player their own green treatment would make exactly that distinction public.
   const [poisoned, setPoisoned] = useState(null);
   const victim = state.witchVictim;
   const potions = state.potions || {};
-  // 首夜可自救;之后刀口是自己就不能用解药
+  // She may heal herself on the first night; after that she cannot use the healing potion when she is
+  // the victim herself
   const selfBlocked = victim === state.myId && !state.canSelfHeal;
   const canHeal = potions.heal && victim && !selfBlocked;
 
   if (state.myRole !== 'witch') {
-    return <p style={{ color: 'var(--muted)', textAlign: 'center' }}>🌙 天黑请闭眼,女巫行动中…</p>;
+    return <p style={{ color: 'var(--muted)', textAlign: 'center' }}>{t('witch.closeEyes')}</p>;
   }
   if (state.iActed) {
-    // 只有女巫自己看得到这个绿色浸染 —— 她本来就知道自己毒了谁
+    // Only the witch herself ever sees this green seep -- she already knows whom she poisoned
     return (
       <div>
-        {poisoned && <PoisonReveal name={nameOf(poisoned)} onDone={() => setPoisoned(null)} />}
-        <WaitHint text="✓ 已行动,等待天亮…" />
+        {poisoned && <PoisonReveal name={nameOf(poisoned)} t={t} onDone={() => setPoisoned(null)} />}
+        <WaitHint text={t('witch.acted')} />
       </div>
     );
   }
@@ -601,17 +664,17 @@ function WitchActions({ state, act, nameOf, alivePlayers }) {
   if (mode === 'poison') {
     return (
       <div>
-        <p style={{ marginBottom: 10, fontWeight: 700, textAlign: 'center' }}>☠️ 选择要毒的玩家</p>
+        <p style={{ marginBottom: 10, fontWeight: 700, textAlign: 'center' }}>{t('witch.pickPoison')}</p>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {alivePlayers.filter((p) => p.id !== state.myId).map((p) => (
             <button key={p.id} style={{ ...ui.btnGhost, color: 'var(--danger)' }}
               onClick={() => { setPoisoned(p.id); act({ type: 'witch', poison: p.id }); }}>
-              毒死 {p.name}
+              {t('witch.poisonPlayer', { name: p.name })}
             </button>
           ))}
         </div>
         <button style={{ ...ui.btnGhost, marginTop: 8, width: '100%' }} onClick={() => setMode(null)}>
-          返回
+          {t('witch.backFromPoison')}
         </button>
       </div>
     );
@@ -620,35 +683,42 @@ function WitchActions({ state, act, nameOf, alivePlayers }) {
   return (
     <div>
       <p style={{ marginBottom: 10, fontWeight: 700, textAlign: 'center' }}>
-        {victim ? `🔪 今晚 ${nameOf(victim)} 倒牌` : '🌙 今晚是平安夜(无人被刀)'}
+        {victim ? t('witch.tonightVictim', { name: nameOf(victim) }) : t('witch.peaceful')}
       </p>
       <div style={{ fontSize: 13, color: 'var(--muted)', textAlign: 'center', marginBottom: 10 }}>
-        解药 {potions.heal ? '✅' : '❌ 已用'} · 毒药 {potions.poison ? '✅' : '❌ 已用'}
-        {selfBlocked && ' · 首夜之后不能自救'}
+        {t('witch.potionStatus', {
+          heal: potions.heal ? '✅' : t('witch.used'),
+          poison: potions.poison ? '✅' : t('witch.used'),
+        })}
+        {selfBlocked && t('witch.noSelfHeal')}
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         {canHeal && (
           <button style={{ ...ui.btnGhost, color: 'var(--accent)' }}
-            onClick={() => act({ type: 'witch', heal: true })}>💊 使用解药救 {nameOf(victim)}</button>
+            onClick={() => act({ type: 'witch', heal: true })}>
+            {t('witch.useHeal', { name: nameOf(victim) })}
+          </button>
         )}
         {potions.poison && (
           <button style={{ ...ui.btnGhost, color: 'var(--danger)' }}
-            onClick={() => setMode('poison')}>☠️ 使用毒药</button>
+            onClick={() => setMode('poison')}>{t('witch.usePoison')}</button>
         )}
-        <button style={ui.btnGhost} onClick={() => act({ type: 'witch' })}>跳过(不用药)</button>
+        <button style={ui.btnGhost} onClick={() => act({ type: 'witch' })}>{t('witch.skip')}</button>
       </div>
     </div>
   );
 }
 
-// 猎人开枪。注意这个组件对"已出局"的猎人也要渲染 —— 他正是因为死了才开枪。
+// The hunter fires. Note that this component must also render for a hunter who is already eliminated --
+// he is shooting precisely because he died.
 //
-// 信息隔离的要点在"瞄准"这一步:猎人选目标的过程只存在于他自己的浏览器里
-// (下面的 aiming 是本地 state,不经过服务端),别人看到的永远只有"猎人正在
-// 选择"这一句。绝不要把瞄准中的目标发给服务端做什么"瞄准动效"—— 那等于在
-// 他扣扳机之前就把枪口指给全场看,被瞄的人可以抢先发言自辩。
-function HunterShot({ state, act, nameOf, alivePlayers }) {
-  // 本地瞄准态:仅用于二次确认,不上报。null = 还没选
+// The crux of the information hiding is the aiming step: the hunter's target selection exists only in his
+// own browser (the `aiming` state below is local and never goes through the server), and all anyone else
+// ever sees is the line "the hunter is choosing". Never send the in-progress aim to the server for some
+// kind of "aiming effect" -- that would show the whole room where the muzzle is pointing before he pulls
+// the trigger, and the player being aimed at could jump in to defend himself first.
+function HunterShot({ state, act, nameOf, alivePlayers, t }) {
+  // Local aiming state: used only for the confirmation step, never reported. null = nothing chosen yet
   const [aiming, setAiming] = useState(null);
 
   if (!state.iAmShooting) {
@@ -656,28 +726,29 @@ function HunterShot({ state, act, nameOf, alivePlayers }) {
       <div style={{ textAlign: 'center' }}>
         <div className="hunter-wait" style={{ fontSize: 40, marginBottom: 6 }}>🔫</div>
         <p style={{ color: 'var(--muted)' }}>
-          {nameOf(state.pendingHunter)} 是猎人,正在选择开枪目标…
+          {t('hunter.waiting', { name: nameOf(state.pendingHunter) })}
         </p>
       </div>
     );
   }
 
-  // 已选中目标 → 二次确认。开枪不可撤销,误点代价太大。
+  // A target has been picked → ask for confirmation. Firing cannot be undone, and a misclick is far too
+  // costly.
   if (aiming) {
     return (
       <div style={{ textAlign: 'center' }}>
-        <p style={{ marginBottom: 10, fontWeight: 700 }}>🔫 确认开枪?</p>
+        <p style={{ marginBottom: 10, fontWeight: 700 }}>{t('hunter.confirm')}</p>
         <div className="hunter-aim" style={{
           fontSize: 38, margin: '0 auto 10px', width: 76, height: 76, lineHeight: '76px',
           borderRadius: '50%', border: '2px solid var(--danger)',
         }}>🎯</div>
-        <p style={{ marginBottom: 12 }}>
-          带走 <b style={{ color: 'var(--danger)' }}>{nameOf(aiming)}</b>
+        <p style={{ marginBottom: 12, color: 'var(--danger)', fontWeight: 700 }}>
+          {t('hunter.takeDown', { name: nameOf(aiming) })}
         </p>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           <button style={{ ...ui.btnAccent, background: 'var(--danger)' }}
-            onClick={() => act({ type: 'hunter_shoot', target: aiming })}>确认开枪</button>
-          <button style={ui.btnGhost} onClick={() => setAiming(null)}>重新选择</button>
+            onClick={() => act({ type: 'hunter_shoot', target: aiming })}>{t('hunter.confirmShoot')}</button>
+          <button style={ui.btnGhost} onClick={() => setAiming(null)}>{t('hunter.reselect')}</button>
         </div>
       </div>
     );
@@ -685,74 +756,77 @@ function HunterShot({ state, act, nameOf, alivePlayers }) {
 
   return (
     <div>
-      <p style={{ marginBottom: 10, fontWeight: 700, textAlign: 'center' }}>🔫 你出局了 —— 开枪带走一人</p>
+      <p style={{ marginBottom: 10, fontWeight: 700, textAlign: 'center' }}>{t('hunter.youAreOut')}</p>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         {alivePlayers.map((p) => (
           <button key={p.id} style={{ ...ui.btnGhost, color: 'var(--danger)' }}
-            onClick={() => setAiming(p.id)}>瞄准 {p.name}</button>
+            onClick={() => setAiming(p.id)}>{t('hunter.aim', { name: p.name })}</button>
         ))}
         <button style={ui.btnGhost} onClick={() => act({ type: 'hunter_shoot', target: null })}>
-          放弃开枪
+          {t('hunter.holdFire')}
         </button>
       </div>
     </div>
   );
 }
 
-// 夜晚行动:狼人选刀、预言家查验。行动后显示等待态(仍可改选,等所有人行动完或超时天亮)。
-function NightActions({ state, act, me, alivePlayers }) {
+// Night actions: the wolves choose a kill, the seer checks a player. After acting a waiting state is
+// shown (the choice can still be changed, until everyone has acted or the timer runs out and day breaks).
+function NightActions({ state, act, me, alivePlayers, t }) {
   const targets = alivePlayers.filter((p) => p.id !== me.id);
   const acted = state.iActed;
 
   if (state.myRole === 'wolf') {
     return (
       <div>
-        <p style={{ marginBottom: 10, fontWeight: 700, textAlign: 'center' }}>🐺 选择今晚猎杀的目标</p>
+        <p style={{ marginBottom: 10, fontWeight: 700, textAlign: 'center' }}>{t('night.wolfPick')}</p>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {targets.map((p) => (
             <button key={p.id} style={{ ...ui.btnGhost, color: 'var(--danger)' }}
-              onClick={() => act({ type: 'wolf_kill', target: p.id })}>猎杀 {p.name}</button>
+              onClick={() => act({ type: 'wolf_kill', target: p.id })}>{t('night.kill', { name: p.name })}</button>
           ))}
         </div>
-        {acted && <WaitHint text="✓ 已出刀,等待其他人行动…" />}
+        {acted && <WaitHint text={t('night.wolfActed')} />}
       </div>
     );
   }
   if (state.myRole === 'seer') {
-    // 与狼人不同:查验每夜只有一次,不能改。已查验后禁用按钮 ——
-    // 否则玩家会一直点,只收到服务端的"今晚已经查验过了"弹窗。
+    // Unlike the wolves: the seer gets one check per night and cannot change it. Once she has checked,
+    // the buttons are disabled -- otherwise players keep clicking and only get the server's "you have
+    // already checked tonight" alert.
     return (
       <div>
         <p style={{ marginBottom: 10, fontWeight: 700, textAlign: 'center' }}>
-          {acted ? '🔮 今晚已查验(每夜限一次)' : '🔮 查验一名玩家的身份'}
+          {acted ? t('night.seerDone') : t('night.seerPick')}
         </p>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {targets.map((p) => (
             <button key={p.id} disabled={acted}
               style={{ ...ui.btnGhost, ...(acted ? { opacity: 0.45, cursor: 'not-allowed' } : null) }}
-              onClick={() => act({ type: 'seer_check', target: p.id })}>查验 {p.name}</button>
+              onClick={() => act({ type: 'seer_check', target: p.id })}>{t('night.check', { name: p.name })}</button>
           ))}
         </div>
-        {acted && <WaitHint text="✓ 已查验,等待其他人行动…" />}
+        {acted && <WaitHint text={t('night.seerActed')} />}
       </div>
     );
   }
-  return <p style={{ color: 'var(--muted)', textAlign: 'center' }}>🌙 天黑请闭眼,等待天亮…</p>;
+  return <p style={{ color: 'var(--muted)', textAlign: 'center' }}>{t('night.sleep')}</p>;
 }
 
-// 白天:讨论 + 投票(同阶段)。列表可点,随时改票;高亮当前票;倒计时到点由服务端结算。
-function DayVote({ state, act, me, alivePlayers, nameOf }) {
-  const myVote = state.myVote;               // 当前票:玩家 id、或 null(弃票)、或 undefined(未投)
+// Daytime: discussion and voting (the same phase). The list is clickable and the vote can be changed at
+// any time; the current vote is highlighted; when the countdown expires the server settles the result.
+function DayVote({ state, act, me, alivePlayers, nameOf, t }) {
+  const myVote = state.myVote;               // the current vote: a player id, null (abstain), or undefined (not voted)
   const voted = state.iVoted;
   const candidates = alivePlayers.filter((p) => p.id !== me.id);
   return (
     <div>
       <p style={{ marginBottom: 6, textAlign: 'center' }}>
-        {victimNames(state.lastNightVictim, nameOf) || '昨晚是平安夜,无人死亡'}
+        {victimNames(state.lastNightVictim, nameOf, t) || t('wolf.nobodyDied')}
       </p>
       <p style={{ color: 'var(--muted)', fontSize: 13, marginBottom: 12, textAlign: 'center' }}>
-        讨论并投票放逐一名玩家 · 时间内可改票 · 全员投完后加速结算
-        {state.cfg?.tiePk ? '(平票进入 PK 加赛)' : '(平票无人出局)'}
+        {t('vote.instructions')}
+        {state.cfg?.tiePk ? t('vote.tiePk') : t('vote.tieNone')}
       </p>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         {candidates.map((p) => {
@@ -761,28 +835,29 @@ function DayVote({ state, act, me, alivePlayers, nameOf }) {
             <button key={p.id}
               style={{ ...ui.btnGhost, ...(picked ? { borderColor: 'var(--accent)', color: 'var(--accent)', fontWeight: 800 } : {}) }}
               onClick={() => act({ type: 'vote', target: p.id })}>
-              {picked ? '✓ ' : ''}投 {p.name}
+              {picked ? '✓ ' : ''}{t('vote.votePlayer', { name: p.name })}
             </button>
           );
         })}
         <button
           style={{ ...ui.btnGhost, color: 'var(--muted)', ...(voted && myVote == null ? { borderColor: 'var(--accent)' } : {}) }}
           onClick={() => act({ type: 'vote', target: null })}>
-          {voted && myVote == null ? '✓ ' : ''}弃票
+          {voted && myVote == null ? '✓ ' : ''}{t('vote.abstain')}
         </button>
       </div>
-      {!voted && <WaitHint text="你还没投票 — 到点未投将视为弃票" />}
+      {!voted && <WaitHint text={t('vote.notVoted')} />}
       {state.dayAllVoted && (
         <p style={{ color: 'var(--accent)', fontSize: 13, marginTop: 10, textAlign: 'center' }}>
-          ✓ 全员已投,即将结算 · 仍可改票
+          {t('vote.allVoted')}
         </p>
       )}
     </div>
   );
 }
 
-// PK 加赛:平票者成为候选。候选人本轮不投票(等裁决);其余存活玩家只能在候选人之间二选一(或弃票)。
-function PkVote({ state, act, nameOf }) {
+// PK tie-breaker: the tied players become the candidates. Candidates do not vote in this round (they
+// await the verdict); every other living player must pick one of the candidates (or abstain).
+function PkVote({ state, act, nameOf, t }) {
   const cands = state.pkCandidates || [];
   const iAmCand = state.iAmPkCandidate;
   const myVote = state.myVote;
@@ -790,15 +865,13 @@ function PkVote({ state, act, nameOf }) {
   return (
     <div>
       <p style={{ marginBottom: 6, textAlign: 'center', fontWeight: 800, color: 'var(--danger)' }}>
-        ⚔️ 平票 PK:{cands.map(nameOf).join(' vs ')}
+        {t('pk.title', { names: cands.map(nameOf).join(' vs ') })}
       </p>
       <p style={{ color: 'var(--muted)', fontSize: 13, marginBottom: 12, textAlign: 'center' }}>
-        {iAmCand
-          ? '你是 PK 候选人 —— 为自己辩护,由其余玩家裁决'
-          : '在候选人之间二选一 · 再次平票则无人出局'}
+        {iAmCand ? t('pk.iAmCandidate') : t('pk.chooseOne')}
       </p>
       {iAmCand ? (
-        <WaitHint text="⚔️ 等待其余玩家投票裁决…" />
+        <WaitHint text={t('pk.waitingVerdict')} />
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {cands.map((id) => {
@@ -807,37 +880,41 @@ function PkVote({ state, act, nameOf }) {
               <button key={id}
                 style={{ ...ui.btnGhost, ...(picked ? { borderColor: 'var(--accent)', color: 'var(--accent)', fontWeight: 800 } : {}) }}
                 onClick={() => act({ type: 'pk_vote', target: id })}>
-                {picked ? '✓ ' : ''}投 {nameOf(id)}
+                {picked ? '✓ ' : ''}{t('vote.votePlayer', { name: nameOf(id) })}
               </button>
             );
           })}
           <button
             style={{ ...ui.btnGhost, color: 'var(--muted)', ...(voted && myVote == null ? { borderColor: 'var(--accent)' } : {}) }}
             onClick={() => act({ type: 'pk_vote', target: null })}>
-            {voted && myVote == null ? '✓ ' : ''}弃票
+            {voted && myVote == null ? '✓ ' : ''}{t('vote.abstain')}
           </button>
         </div>
       )}
       {state.dayAllVoted && (
         <p style={{ color: 'var(--accent)', fontSize: 13, marginTop: 10, textAlign: 'center' }}>
-          ✓ 全员已投,即将裁决 · 仍可改票
+          {t('pk.allVoted')}
         </p>
       )}
     </div>
   );
 }
 
-// 讨论区。存活者:白天/PK 可公开发言(夜晚禁言);死者/观战者:走死人频道(仅死者+观战者可见)。
-// 发言权限与服务端一致 —— 服务端才是权威,这里只是不给不能发言的人显示输入框。
-function ChatPanel({ state, act, messages, chatEndRef, isSpectator, iAmAlive }) {
+// Discussion area. Living players may speak publicly during the day and PK phases (they are muted at
+// night); dead players and spectators use the dead channel (visible only to the dead and spectators).
+// These speaking rules mirror the server's -- the server is the authority, and all we do here is hide the
+// input box from people who are not allowed to speak.
+function ChatPanel({ state, act, messages, chatEndRef, isSpectator, iAmAlive, t }) {
   const [text, setText] = useState('');
   const dead = !isSpectator && iAmAlive === false;
-  // 发言阶段只有轮到的人能说;投票阶段(day/pk)大家自由讨论。
+  // During the speech phase only the player whose turn it is may talk; during the voting phases (day/pk)
+  // everyone discusses freely.
   const canSpeakPublic = iAmAlive && (
     state.phase === 'day' || state.phase === 'pk' ||
     (state.phase === 'speech' && state.iAmSpeaking)
   );
-  // 观战者不能发言(服务端会拒);死者可发死人频道;存活者按上面的规则。
+  // Spectators cannot speak at all (the server rejects it); dead players can post on the dead channel;
+  // living players follow the rule above.
   const canSend = !isSpectator && (dead || canSpeakPublic);
   const send = () => {
     const t = text.trim();
@@ -848,12 +925,12 @@ function ChatPanel({ state, act, messages, chatEndRef, isSpectator, iAmAlive }) 
   return (
     <div style={{ marginTop: 16, borderTop: '1px solid var(--border)', paddingTop: 12 }}>
       <label style={ui.label}>
-        💬 讨论{dead ? ' · 死人频道(存活玩家看不到)' : ''}
+        {t('chat.title')}{dead ? t('chat.deadChannel') : ''}
       </label>
       <div style={{ maxHeight: 180, overflowY: 'auto', display: 'flex', flexDirection: 'column',
                     gap: 4, fontSize: 14, marginBottom: 8 }}>
         {messages.length === 0 && (
-          <p style={{ color: 'var(--muted)', fontSize: 13, margin: 0 }}>还没有人发言…</p>
+          <p style={{ color: 'var(--muted)', fontSize: 13, margin: 0 }}>{t('chat.empty')}</p>
         )}
         {messages.map((m) => (
           <div key={m.id} style={{ color: m.channel === 'dead' ? 'var(--muted)' : 'var(--text)' }}>
@@ -868,18 +945,18 @@ function ChatPanel({ state, act, messages, chatEndRef, isSpectator, iAmAlive }) 
           <input
             style={{ ...ui.input, marginBottom: 0, flex: 1 }}
             value={text} maxLength={300}
-            placeholder={dead ? '对死者说…' : '发言讨论…'}
+            placeholder={dead ? t('chat.deadPlaceholder') : t('chat.placeholder')}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') send(); }}
           />
-          <button style={ui.btnAccent} onClick={send}>发送</button>
+          <button style={ui.btnAccent} onClick={send}>{t('common.send')}</button>
         </div>
       ) : (
         <p style={{ color: 'var(--muted)', fontSize: 13, margin: 0 }}>
-          {isSpectator ? '观战中,仅可查看讨论'
-            : state.phase === 'night' ? '🌙 夜晚不能公开发言'
-            : state.phase === 'speech' ? '🎤 轮流发言中,等待轮到你…'
-            : '当前不能发言'}
+          {isSpectator ? t('chat.spectator')
+            : state.phase === 'night' ? t('chat.nightMuted')
+            : state.phase === 'speech' ? t('chat.waitTurn')
+            : t('chat.cannotSpeak')}
         </p>
       )}
     </div>

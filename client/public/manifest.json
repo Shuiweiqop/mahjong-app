@@ -1,7 +1,7 @@
 {
-  "name": "Playground · 多人游戏平台",
+  "name": "Playground · Multiplayer Games",
   "short_name": "Playground",
-  "description": "多人实时游戏平台 —— 你画我猜、狼人杀等",
+  "description": "Real-time multiplayer game platform — Draw & Guess, Werewolf and more",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

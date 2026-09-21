@@ -1,28 +1,34 @@
-// 游戏模块契约测试(架构测试)—— 用 node --test 跑,零依赖。
+// Contract tests for the game modules (architecture tests) -- run with node --test, zero dependencies.
 //
-// 这里检的都是"违反了没人会发现"的东西:信息隔离靠的是每个模块自觉,
-// 写错了不会抛异常、不会 lint 报错,只会安静地把身份发给不该看的人。
-// 把它们变成红灯,是这个文件存在的唯一理由。
+// Everything checked here is the kind of violation nobody would otherwise notice:
+// information hiding depends on each module policing itself, and getting it wrong
+// throws no exception and trips no linter -- it just quietly ships roles to people
+// who should not see them.
+// Turning those failures red is the only reason this file exists.
 //
 //   cd server && npm test
 //
-// 新增游戏时不需要改本文件:它对 registry 里注册的所有模块自动生效。
+// Adding a game needs no change here: this applies automatically to every module
+// registered in the registry.
 
 const { test } = require('node:test');
 const assert = require('node:assert');
 
 const { listGames, getGame } = require('./registry');
 
-// 与 rooms.js 的 spectatorViewFor 保持一致:观战者视图是"用一个不存在的玩家 id
-// 调 serializeStateFor"。这个技巧成立的前提是模块按白名单发字段 —— 下面就是在钉死这个前提。
+// Mirrors spectatorViewFor in rooms.js: a spectator view is just serializeStateFor
+// called with a player id that does not exist. That trick only holds if modules emit
+// fields from an allowlist -- which is exactly the assumption pinned down below.
 const SPECTATOR_ID = '__spectator__';
 
-// 造一批假玩家喂给 createInitialState。取 maxPlayers 让角色分配尽量铺开。
+// Build a batch of fake players to feed createInitialState. Using maxPlayers spreads
+// the role assignment as widely as possible.
 function makePlayers(n) {
-  return Array.from({ length: n }, (_, i) => ({ id: `p${i}`, name: `玩家${i}` }));
+  return Array.from({ length: n }, (_, i) => ({ id: `p${i}`, name: `Player${i}` }));
 }
 
-// 递归收集视图里出现的所有字符串值,用来判断"秘密有没有漏出去"。
+// Recursively collect every string value appearing in a view, so we can tell whether
+// a secret leaked out.
 function collectStrings(value, out = []) {
   if (typeof value === 'string') out.push(value);
   else if (Array.isArray(value)) value.forEach((v) => collectStrings(v, out));
@@ -34,18 +40,18 @@ function collectStrings(value, out = []) {
 
 const MODULES = listGames().map((g) => getGame(g.id));
 
-test('registry 里每个模块都实现了完整接口', () => {
-  assert.ok(MODULES.length > 0, 'registry 是空的');
+test('every module in the registry implements the full interface', () => {
+  assert.ok(MODULES.length > 0, 'the registry is empty');
   for (const mod of MODULES) {
     for (const fn of ['createInitialState', 'applyAction', 'serializeStateFor', 'isGameOver']) {
-      assert.strictEqual(typeof mod[fn], 'function', `${mod.id} 缺少 ${fn}()`);
+      assert.strictEqual(typeof mod[fn], 'function', `${mod.id} is missing ${fn}()`);
     }
-    assert.ok(mod.minPlayers >= 1, `${mod.id} 的 minPlayers 无效`);
-    assert.ok(mod.maxPlayers >= mod.minPlayers, `${mod.id} 的 maxPlayers 无效`);
+    assert.ok(mod.minPlayers >= 1, `${mod.id} has an invalid minPlayers`);
+    assert.ok(mod.maxPlayers >= mod.minPlayers, `${mod.id} has an invalid maxPlayers`);
   }
 });
 
-test('游戏模块是纯逻辑:不 require socket / db / express', () => {
+test('game modules are pure logic: they do not require socket / db / express', () => {
   const fs = require('fs');
   const path = require('path');
   const dir = __dirname;
@@ -58,58 +64,64 @@ test('游戏模块是纯逻辑:不 require socket / db / express', () => {
       const src = fs.readFileSync(path.join(gameDir, file), 'utf8');
       assert.ok(
         !banned.test(src),
-        `${entry.name}/${file} 引入了传输/存储层 —— 游戏模块必须是纯逻辑`
+        `${entry.name}/${file} pulls in the transport or storage layer -- game modules must stay pure logic`
       );
     }
   }
 });
 
-// 核心:serializeStateFor 必须按白名单构造视图。
-// 若有人改成 `return { ...state }`,原始 state 的秘密字段会整个跟出来,这里立刻红。
-test('serializeStateFor 不把整个 state 抄给玩家', () => {
+// The core one: serializeStateFor must build its view from an allowlist.
+// If someone changes it to `return { ...state }`, every secret field on the raw state
+// comes along with it, and this test goes red immediately.
+test('serializeStateFor does not copy the whole state to the player', () => {
   for (const mod of MODULES) {
     const state = mod.createInitialState(makePlayers(mod.maxPlayers), {});
     const canary = '__SECRET_CANARY__';
-    state.__secretCanary = canary;   // 模拟"新加了一个没在视图里显式放行的字段"
+    state.__secretCanary = canary;   // simulate a newly added field that the view never explicitly allows
 
     for (const p of state.players || []) {
       const view = mod.serializeStateFor(state, p.id);
       assert.ok(
         !collectStrings(view).includes(canary),
-        `${mod.id}: serializeStateFor 把未显式放行的字段带进了视图` +
-        `(多半是 return {...state} / Object.assign)。视图必须按白名单逐字段构造。`
+        `${mod.id}: serializeStateFor let a field that was never explicitly allowed into the view ` +
+        `(most likely a return {...state} or Object.assign). Views must be built field by field from an allowlist.`
       );
     }
   }
 });
 
-// 观战者安全:rooms.js 用一个不存在的 id 生成观战视图,前提是"陌生 id 拿到纯公开信息"。
-// 若某个模块把 roles 无条件塞进视图,随便开个小号进来观战就能看穿全场 —— 这里钉死。
-test('未知玩家 id(观战者)拿不到任何人的身份', () => {
+// Spectator safety: rooms.js generates the spectator view with a non-existent id, which
+// relies on an unknown id receiving purely public information.
+// If any module puts roles into the view unconditionally, anyone could join on a second
+// account, spectate, and see the whole table -- pinned down here.
+test('an unknown player id (a spectator) gets no role for anyone', () => {
   for (const mod of MODULES) {
     const state = mod.createInitialState(makePlayers(mod.maxPlayers), {});
-    if (!state.roles) continue;               // 该游戏没有隐藏身份
+    if (!state.roles) continue;               // this game has no hidden roles
 
     const view = mod.serializeStateFor(state, SPECTATOR_ID);
     assert.ok(
       view.roles === undefined,
-      `${mod.id}: 观战视图里出现了 roles —— 未开局就泄底。` +
-      `身份只能在 phase === 'ended' 或房主显式开上帝视角时公开(见 rooms.js spectatorViewFor)。`
+      `${mod.id}: roles appeared in the spectator view -- the game is given away before it starts. ` +
+      `Roles may only be revealed when phase === 'ended', or when the host explicitly enables god view (see spectatorViewFor in rooms.js).`
     );
     assert.strictEqual(
       view.myRole, undefined,
-      `${mod.id}: 陌生 id 拿到了 myRole`
+      `${mod.id}: an unknown id received myRole`
     );
   }
 });
 
-// 停表契约:deadline 是绝对时间戳,房间没人时必须能挂起,否则重连后倒计时已经跑没了。
-// 实现了 pauseClock 的模块必须同时实现 resumeClock,且两者要真的对称。
-test('pauseClock / resumeClock 成对出现且对称', () => {
+// The stop-the-clock contract: deadline is an absolute timestamp, so it has to be
+// suspendable while nobody is in the room -- otherwise the countdown has already run out
+// by the time anyone reconnects.
+// A module implementing pauseClock must implement resumeClock too, and the two must
+// genuinely be symmetric.
+test('pauseClock / resumeClock come as a pair and are symmetric', () => {
   for (const mod of MODULES) {
     if (!mod.pauseClock && !mod.resumeClock) continue;
-    assert.strictEqual(typeof mod.pauseClock, 'function', `${mod.id} 有 resumeClock 却没有 pauseClock`);
-    assert.strictEqual(typeof mod.resumeClock, 'function', `${mod.id} 有 pauseClock 却没有 resumeClock`);
+    assert.strictEqual(typeof mod.pauseClock, 'function', `${mod.id} has resumeClock but no pauseClock`);
+    assert.strictEqual(typeof mod.resumeClock, 'function', `${mod.id} has pauseClock but no resumeClock`);
 
     const state = mod.createInitialState(makePlayers(mod.maxPlayers), {});
     state.phase = 'day';
@@ -118,12 +130,12 @@ test('pauseClock / resumeClock 成对出现且对称', () => {
     mod.pauseClock(state);
     assert.strictEqual(
       state.deadline, null,
-      `${mod.id}: pauseClock 没有清掉 deadline —— 停表期间倒计时仍在走`
+      `${mod.id}: pauseClock did not clear deadline -- the countdown keeps running while the clock is meant to be stopped`
     );
     mod.resumeClock(state);
     assert.ok(
       state.deadline > Date.now(),
-      `${mod.id}: resumeClock 没有重设出一个未来的 deadline`
+      `${mod.id}: resumeClock did not set a new deadline in the future`
     );
   }
 });

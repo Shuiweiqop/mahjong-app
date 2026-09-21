@@ -35,8 +35,10 @@ input {
   body { font-size: 14px; }
 }
 
-/* 对局双栏布局:宽屏「主区 + 固定侧栏」,窄屏(手机)降级为单栏竖排。
-   狼人杀 / 你画我猜共用。--side 为侧栏宽,由各组件用内联 style 变量传入。 */
+/* In-game two-column layout: on wide screens "main area + fixed sidebar"; on narrow
+   screens (phones) it degrades to a single stacked column. Shared by Werewolf and
+   Draw & Guess. --side is the sidebar width, passed in by each component as an
+   inline style variable. */
 .game-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) var(--side, 220px);
@@ -44,7 +46,7 @@ input {
 }
 @media (max-width: 640px) {
   .game-layout {
-    grid-template-columns: 1fr;   /* 窄屏:侧栏落到主区下方,各自占满整行 */
+    grid-template-columns: 1fr;   /* Narrow screens: the sidebar drops below the main area, each taking a full row */
   }
 }
 
@@ -53,8 +55,9 @@ input {
   50% { opacity: 0.3; }
 }
 
-/* 遇害动画的刀光:一道白光沿对角线扫过牌面,扫完即隐。
-   配合 WerewolfGame 的 SlashReveal —— 牌被切成两半后错开滑落。 */
+/* The blade flash of the kill animation: a streak of white light sweeps diagonally
+   across the card, then vanishes. Pairs with WerewolfGame's SlashReveal — the card is
+   cut in two and the halves slide apart. */
 @keyframes bladeSweep {
   0%   { transform: translate(-130%, -130%); opacity: 0; }
   35%  { opacity: 1; }
@@ -64,7 +67,7 @@ input {
   animation: bladeSweep 0.55s cubic-bezier(0.4, 0, 0.2, 1) forwards;
   mix-blend-mode: screen;
 }
-/* 被切开的瞬间整块抖一下,强化"被砍中"的手感 */
+/* A shake of the whole block at the moment of the cut, to sell the feel of "being struck" */
 @keyframes slashShake {
   0%, 100% { transform: translateX(0); }
   25% { transform: translateX(-4px); }
@@ -72,20 +75,20 @@ input {
 }
 .slash-wrap { animation: slashShake 0.25s ease-in-out 0.2s; }
 
-/* 平安夜:刀光劈到一半被盾牌挡下 —— 扫到中间就停住并回弹。
-   和 bladeSweep 的区别只在于它不会扫过去。 */
+/* Peaceful night: the blade is stopped halfway by a shield — it halts mid-sweep and
+   bounces back. The only difference from bladeSweep is that it never makes it across. */
 @keyframes bladeBlocked {
   0%   { transform: translate(-130%, -130%); opacity: 0; }
   40%  { transform: translate(-10%, -10%); opacity: 1; }
   55%  { transform: translate(0, 0); opacity: 1; }
-  70%  { transform: translate(-25%, -25%); opacity: 0.8; }   /* 被弹开 */
+  70%  { transform: translate(-25%, -25%); opacity: 0.8; }   /* knocked back */
   100% { transform: translate(-60%, -60%); opacity: 0; }
 }
 .block-blade {
   animation: bladeBlocked 0.9s cubic-bezier(0.3, 0, 0.4, 1) forwards;
   mix-blend-mode: screen;
 }
-/* 撞击瞬间迸出的火花 */
+/* Sparks thrown off at the moment of impact */
 @keyframes sparkBurst {
   0%   { transform: scale(0); opacity: 0; }
   45%  { transform: scale(0); opacity: 0; }
@@ -93,7 +96,7 @@ input {
   100% { transform: scale(11); opacity: 0; }
 }
 .block-spark { animation: sparkBurst 0.9s ease-out forwards; }
-/* 盾牌被磕了一下 */
+/* The shield takes the knock */
 @keyframes shieldBrace {
   0%, 100% { transform: scale(1); }
   58% { transform: scale(0.94); }
@@ -101,9 +104,10 @@ input {
 }
 .block-shield { animation: shieldBrace 0.9s ease-out; }
 
-/* 猎人开枪:枪口闪光从中心炸开,目标牌被击中一震后倒下。
-   只在开完枪(既成事实)时播;瞄准过程没有任何动画,否则等于提前
-   把枪口指向谁告诉全场。 */
+/* Hunter's shot: the muzzle flash bursts out from the center, the target card is hit,
+   shudders, and falls. Played only once the shot has been fired (an accomplished fact);
+   the aiming process has no animation at all, since that would tell the whole table who
+   the barrel is pointed at ahead of time. */
 @keyframes gunFlash {
   0%   { transform: scale(0); opacity: 0; }
   15%  { transform: scale(7); opacity: 1; }
@@ -117,16 +121,16 @@ input {
   70% { transform: translate(3px, -1px); }
 }
 .gun-hit { animation: gunHit 0.4s ease-out; }
-/* 等待猎人选择时的呼吸感(不指向任何人,只表示"在等") */
+/* A breathing pulse while waiting for the hunter to choose (points at nobody, it only says "waiting") */
 .hunter-wait { animation: pulse 1.4s ease-in-out infinite; }
-/* 二次确认时的准星缩放 */
+/* Crosshair zoom on the confirmation step */
 @keyframes aimLock {
   0% { transform: scale(1.35); opacity: 0.4; }
   100% { transform: scale(1); opacity: 1; }
 }
 .hunter-aim { animation: aimLock 0.3s ease-out; }
 
-/* 毒药:绿色从中心慢慢浸染开 */
+/* Poison: green slowly seeps outward from the center */
 @keyframes poisonSeep {
   0%   { transform: scale(0); opacity: 0; }
   20%  { opacity: 0.9; }
@@ -134,7 +138,7 @@ input {
 }
 .poison-seep { animation: poisonSeep 1.6s ease-out forwards; }
 
-/* 放逐:票堆从上方砸下 */
+/* Exile: the pile of votes slams down from above */
 @keyframes votesDrop {
   0%   { transform: translateY(-90px) rotate(-8deg); opacity: 0; }
   45%  { transform: translateY(48px) rotate(2deg); opacity: 1; }
@@ -143,7 +147,7 @@ input {
 }
 .exile-votes { animation: votesDrop 1.5s cubic-bezier(0.5, 0, 0.75, 0.3) forwards; }
 
-/* 你画我猜:猜中加分的数字弹跳上浮 */
+/* Draw & Guess: the points for a correct guess bounce and float upward */
 @keyframes scorePop {
   0%   { transform: translateY(0) scale(0.6); opacity: 0; }
   25%  { transform: translateY(-14px) scale(1.25); opacity: 1; }
@@ -157,7 +161,7 @@ input {
   white-space: nowrap;
 }
 
-/* 炸弹猫:抽到炸弹时牌炸开 */
+/* Exploding Kittens: the card blows apart when a bomb is drawn */
 @keyframes kittenBlast {
   0%   { transform: scale(0); opacity: 0; }
   18%  { transform: scale(9); opacity: 1; }
@@ -172,14 +176,15 @@ input {
 }
 .kitten-boom { animation: kittenBoom 1.3s ease-out forwards; }
 
-/* 系统开启"减弱动态效果"时,不做位移/闪光类动画 —— 对前庭敏感的用户
-   这类效果会引起不适。结果照常显示,只是不animate。 */
+/* When the system has "reduce motion" enabled, skip the movement/flash animations —
+   for users sensitive to vestibular triggers these effects cause discomfort. The
+   outcome is still shown as usual, it just isn't animated. */
 @media (prefers-reduced-motion: reduce) {
   .slash-blade, .block-blade, .block-spark, .gun-flash,
   .poison-seep, .exile-votes, .kitten-blast { animation: none; opacity: 0; }
   .kitten-boom { animation: none; }
   .slash-wrap, .block-shield, .gun-hit, .hunter-wait, .hunter-aim { animation: none; }
   .slash-wrap *, .gun-hit { transition: none !important; }
-  /* 加分仍然显示,只是不做位移 */
+  /* Score gains are still shown, just without the movement */
   .score-pop { animation: none; opacity: 1; transform: none; }
 }

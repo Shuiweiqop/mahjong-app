@@ -1,9 +1,12 @@
-// ── 牌的定义 ────────────────────────────────────────────
-// 花色: m=万, p=饼, s=条, z=字牌
-// 字牌: z1=东 z2=南 z3=西 z4=北 z5=中 z6=发 z7=白
+// ── Tile definitions ────────────────────────────────────
+// Suits: m=Characters, p=Dots, s=Bamboo, z=honour tiles
+// Honours: z1=East z2=South z3=West z4=North z5=Red z6=Green z7=White
 
 export const SUITS = ['m', 'p', 's', 'z'];
 
+// Chinese display names for tiles. This is reference data, not UI text: nothing
+// renders it today (tileName below is unused, and the calculator builds its own tile
+// faces from the string table). Kept as the canonical mapping.
 export const TILE_NAMES = {
   m: ['', '一万', '二万', '三万', '四万', '五万', '六万', '七万', '八万', '九万'],
   p: ['', '一饼', '二饼', '三饼', '四饼', '五饼', '六饼', '七饼', '八饼', '九饼'],
@@ -11,27 +14,27 @@ export const TILE_NAMES = {
   z: ['', '东', '南', '西', '北', '中', '发', '白'],
 };
 
-// 创建一张牌对象
+// Create a tile object
 export function tile(suit, num) {
   return { suit, num };
 }
 
-// 牌转字符串，方便 debug
+// Tile to string, handy for debugging
 export function tileToStr(t) {
   return `${t.num}${t.suit}`;
 }
 
-// 牌的显示名
+// Display name of a tile
 export function tileName(t) {
   return TILE_NAMES[t.suit][t.num];
 }
 
-// 两张牌是否相同
+// Whether two tiles are the same
 export function tileEq(a, b) {
   return a.suit === b.suit && a.num === b.num;
 }
 
-// 排序（用于标准化手牌）
+// Sorting (used to normalize a hand)
 export function sortTiles(tiles) {
   const order = { m: 0, p: 1, s: 2, z: 3 };
   return [...tiles].sort((a, b) =>
@@ -39,21 +42,21 @@ export function sortTiles(tiles) {
   );
 }
 
-// 是否字牌
+// Whether it is an honour tile
 export function isHonor(t) { return t.suit === 'z'; }
 
-// 是否老头牌（1、9、字牌）
+// Whether it is a terminal tile (1, 9, or an honour)
 export function isTerminalOrHonor(t) {
   return t.suit === 'z' || t.num === 1 || t.num === 9;
 }
 
-// 是否绿牌（发财用，国标需要）
+// Whether it is a green tile (used for All Green, required by Chinese Official)
 export function isGreen(t) {
   return (t.suit === 's' && [2,3,4,6,8].includes(t.num)) ||
          (t.suit === 'z' && t.num === 6);
 }
 
-// 全部牌（136张）
+// The full deck (136 tiles)
 export function fullDeck() {
   const deck = [];
   for (const suit of ['m', 'p', 's']) {

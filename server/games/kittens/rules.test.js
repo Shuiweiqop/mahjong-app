@@ -1,7 +1,9 @@
-// 炸弹猫规则测试。
+// Exploding Kittens rule tests.
 //
-// 这个游戏的隐藏信息和前两个不一样:它是"动态"的 —— 牌堆顺序会被洞悉未来
-// 看到、被洗牌打乱、被拆弹者塞回。所以泄露面比角色/词语更大,测试重点在这。
+// The hidden information in this game differs from the other two in being dynamic: the
+// deck order gets peeked at by See the Future, scrambled by Shuffle, and written back into
+// by whoever defuses a bomb. That is a far wider leak surface than a role or a word, which
+// is where these tests concentrate.
 //
 //   cd server && npm test
 
@@ -20,114 +22,114 @@ function started(n = 4, cfg = {}) {
 }
 const cur = (s) => s.order[s.turnIndex];
 
-// ── 发牌与牌库 ──
+// ── Dealing and the deck ──
 
-test('炸弹数恰好比人数少 1 —— 保证最后剩一人', () => {
+test('there is exactly one bomb fewer than players, guaranteeing a sole survivor', () => {
   for (const n of [2, 3, 5, 8]) {
     const s = started(n);
     const bombs = s.deck.filter((c) => c === CARD.BOMB).length;
-    assert.strictEqual(bombs, n - 1, `${n} 人局应有 ${n - 1} 张炸弹`);
+    assert.strictEqual(bombs, n - 1, `a ${n}-player game should hold ${n - 1} bombs`);
   }
 });
 
-test('开局每人 1 张拆弹 + 7 张普通牌,手牌里没有炸弹', () => {
+test('everyone starts with 1 Defuse plus 7 ordinary cards, and no bomb in hand', () => {
   const s = started(4);
   for (const id of s.order) {
     const hand = s.hands[id];
     assert.strictEqual(hand.length, 8);
     assert.strictEqual(hand.filter((c) => c === CARD.DEFUSE).length, 1);
-    assert.ok(!hand.includes(CARD.BOMB), '开局手牌里绝不能有炸弹');
+    assert.ok(!hand.includes(CARD.BOMB), 'a starting hand must never contain a bomb');
   }
 });
 
-// ── 信息隔离(本模块最重要的部分) ──
+// ── Information hiding (the most important part of this module) ──
 
-test('视图绝不含牌堆顺序,也不含别人的手牌', () => {
+test('a view never contains the deck order, nor anyone elses hand', () => {
   const s = started(4);
   const view = k.serializeStateFor(s, s.order[0]);
-  assert.strictEqual(view.deck, undefined, 'deck 泄露 = 所有人都知道炸弹在哪');
-  assert.strictEqual(view.hands, undefined, 'hands 泄露 = 所有人的牌都公开了');
-  assert.strictEqual(typeof view.deckCount, 'number', '只该给剩余张数');
+  assert.strictEqual(view.deck, undefined, 'leaking deck = everyone knows where the bombs are');
+  assert.strictEqual(view.hands, undefined, 'leaking hands = every hand is public');
+  assert.strictEqual(typeof view.deckCount, 'number', 'only the remaining count should be sent');
 });
 
-test('只看得到自己的手牌,别人只有张数', () => {
+test('you see only your own hand; for others, only a count', () => {
   const s = started(4);
   const me = s.order[0];
   const view = k.serializeStateFor(s, me);
   assert.deepStrictEqual(view.myHand, s.hands[me]);
   for (const p of view.players) {
     assert.strictEqual(typeof p.handCount, 'number');
-    assert.strictEqual(p.hand, undefined, '别人的手牌内容不能出现在视图里');
+    assert.strictEqual(p.hand, undefined, 'the contents of another hand must not appear in the view');
   }
 });
 
-test('洞悉未来的三张只发给用牌的人', () => {
+test('the three See the Future cards go only to the player who played it', () => {
   const s = started(4);
   const me = cur(s);
   s.hands[me] = [CARD.FUTURE, CARD.DEFUSE];
   k.applyAction(s, { type: 'play', cards: [CARD.FUTURE] }, me);
   s.deadline = Date.now() - 1;
-  k.applyAction(s, { type: 'tick' }, null);   // 关闭否决窗口让它生效
+  k.applyAction(s, { type: 'tick' }, null);   // close the nope window so it resolves
 
-  assert.strictEqual(k.serializeStateFor(s, me).myFuture?.length, 3, '用牌者应看到三张');
+  assert.strictEqual(k.serializeStateFor(s, me).myFuture?.length, 3, 'the player who used it should see three cards');
   for (const other of s.order.filter((id) => id !== me)) {
     assert.strictEqual(k.serializeStateFor(s, other).myFuture, undefined,
-      '其他人绝不能看到牌堆顶');
+      'nobody else may ever see the top of the deck');
   }
 });
 
-test('拆弹者塞回炸弹的位置不泄露给别人', () => {
+test('where the defuser puts the bomb back is not leaked to anyone else', () => {
   const s = started(4);
   const me = cur(s);
   s.hands[me] = [CARD.DEFUSE];
-  s.deck = [CARD.SKIP, CARD.SKIP, CARD.BOMB];   // 顶部是末尾
+  s.deck = [CARD.SKIP, CARD.SKIP, CARD.BOMB];   // the end of the array is the top of the deck
   k.applyAction(s, { type: 'draw' }, me);
   assert.strictEqual(s.phase, 'defusing');
 
   const other = s.order.find((id) => id !== me);
   const view = k.serializeStateFor(s, other);
   assert.strictEqual(view.iAmDefusing, false);
-  assert.strictEqual(view.deckSize, undefined, '只有拆弹者需要知道牌堆长度用来选位置');
+  assert.strictEqual(view.deckSize, undefined, 'only the defuser needs the deck length, in order to choose a position');
   assert.strictEqual(view.deck, undefined);
 
   k.applyAction(s, { type: 'place_bomb', position: 0 }, me);
   const after = k.serializeStateFor(s, other);
-  assert.strictEqual(after.deck, undefined, '塞回之后位置更不能泄露');
+  assert.strictEqual(after.deck, undefined, 'after it is placed, the position must leak even less');
 });
 
-// ── 炸弹与拆弹 ──
+// ── Bombs and defusing ──
 
-test('没有拆弹抽到炸弹即出局', () => {
+test('drawing a bomb without a Defuse knocks you out', () => {
   const s = started(3);
   const me = cur(s);
-  s.hands[me] = [CARD.SKIP];          // 没有拆弹
+  s.hands[me] = [CARD.SKIP];          // no Defuse
   s.deck = [CARD.BOMB];
   k.applyAction(s, { type: 'draw' }, me);
-  assert.strictEqual(s.alive[me], false, '应当出局');
+  assert.strictEqual(s.alive[me], false, 'should be out');
 });
 
-test('有拆弹抽到炸弹不出局,并进入放置阶段', () => {
+test('drawing a bomb with a Defuse keeps you in and moves to the placement phase', () => {
   const s = started(3);
   const me = cur(s);
   s.hands[me] = [CARD.DEFUSE];
   s.deck = [CARD.SKIP, CARD.BOMB];
   k.applyAction(s, { type: 'draw' }, me);
-  assert.strictEqual(s.alive[me], true, '有拆弹不该出局');
+  assert.strictEqual(s.alive[me], true, 'holding a Defuse should keep you in');
   assert.strictEqual(s.phase, 'defusing');
-  assert.ok(!s.hands[me].includes(CARD.DEFUSE), '拆弹应被消耗');
+  assert.ok(!s.hands[me].includes(CARD.DEFUSE), 'the Defuse should be consumed');
 });
 
-test('放置炸弹的位置真的生效', () => {
+test('the chosen bomb position actually takes effect', () => {
   const s = started(3);
   const me = cur(s);
   s.hands[me] = [CARD.DEFUSE];
   s.deck = [CARD.SKIP, CARD.SKIP, CARD.BOMB];
   k.applyAction(s, { type: 'draw' }, me);
   k.applyAction(s, { type: 'place_bomb', position: 0 }, me);
-  assert.strictEqual(s.deck[s.deck.length - 1], CARD.BOMB, 'position 0 = 牌堆顶,下一个人立刻抽到');
+  assert.strictEqual(s.deck[s.deck.length - 1], CARD.BOMB, 'position 0 = top of the deck, so the next player draws it immediately');
 });
 
-test('只有拆弹者本人能放置炸弹', () => {
+test('only the defuser themselves can place the bomb', () => {
   const s = started(3);
   const me = cur(s);
   s.hands[me] = [CARD.DEFUSE];
@@ -137,19 +139,19 @@ test('只有拆弹者本人能放置炸弹', () => {
   assert.ok(k.applyAction(s, { type: 'place_bomb', position: 0 }, other).error);
 });
 
-// ── 否决窗口(本作最复杂的机制) ──
+// ── The nope window (the trickiest mechanic in this game) ──
 
-test('功能牌先进否决窗口,不立即生效', () => {
+test('an action card enters the nope window first and does not resolve immediately', () => {
   const s = started(4);
   const me = cur(s);
   s.hands[me] = [CARD.SKIP, CARD.DEFUSE];
   k.applyAction(s, { type: 'play', cards: [CARD.SKIP] }, me);
   assert.strictEqual(s.phase, 'nope');
   assert.strictEqual(s.pending.card, CARD.SKIP);
-  assert.strictEqual(cur(s), me, '窗口期间回合还没轮走');
+  assert.strictEqual(cur(s), me, 'the turn has not moved on while the window is open');
 });
 
-test('单次否决使牌作废,回合仍属出牌者', () => {
+test('a single nope voids the card, and the turn stays with whoever played it', () => {
   const s = started(4);
   const me = cur(s);
   s.hands[me] = [CARD.SKIP, CARD.DEFUSE];
@@ -162,10 +164,10 @@ test('单次否决使牌作废,回合仍属出牌者', () => {
   k.applyAction(s, { type: 'tick' }, null);
 
   assert.strictEqual(s.phase, 'playing');
-  assert.strictEqual(cur(s), me, '跳过被否决,出牌者仍在自己的回合');
+  assert.strictEqual(cur(s), me, 'the Skip was noped, so the player who played it is still on their own turn');
 });
 
-test('否决可以被再否决(偶数次 = 生效)', () => {
+test('a nope can itself be noped (an even number of them = it resolves)', () => {
   const s = started(4);
   const me = cur(s);
   s.hands[me] = [CARD.SKIP, CARD.DEFUSE];
@@ -174,28 +176,28 @@ test('否决可以被再否决(偶数次 = 生效)', () => {
   s.hands[b] = [CARD.NOPE];
 
   k.applyAction(s, { type: 'play', cards: [CARD.SKIP] }, me);
-  k.applyAction(s, { type: 'nope' }, a);      // 否决
-  k.applyAction(s, { type: 'nope' }, b);      // 反否决
+  k.applyAction(s, { type: 'nope' }, a);      // nope
+  k.applyAction(s, { type: 'nope' }, b);      // counter-nope
   assert.strictEqual(s.pending.nopes.length, 2);
   s.deadline = Date.now() - 1;
   k.applyAction(s, { type: 'tick' }, null);
 
-  assert.notStrictEqual(cur(s), me, '两次否决相消,跳过生效,回合轮走');
+  assert.notStrictEqual(cur(s), me, 'the two nopes cancel out, the Skip resolves, and the turn moves on');
 });
 
-test('没有否决牌不能否决', () => {
+test('you cannot nope without a Nope card', () => {
   const s = started(4);
   const me = cur(s);
   s.hands[me] = [CARD.SKIP, CARD.DEFUSE];
   const other = s.order.find((id) => id !== me);
-  s.hands[other] = [CARD.SKIP];               // 没有 nope
+  s.hands[other] = [CARD.SKIP];               // no nope
   k.applyAction(s, { type: 'play', cards: [CARD.SKIP] }, me);
   assert.ok(k.applyAction(s, { type: 'nope' }, other).error);
 });
 
-// ── 回合与攻击 ──
+// ── Turns and Attack ──
 
-test('攻击让下家连打两回合', () => {
+test('Attack makes the next player take two turns in a row', () => {
   const s = started(4);
   const me = cur(s);
   s.hands[me] = [CARD.ATTACK, CARD.DEFUSE];
@@ -203,11 +205,11 @@ test('攻击让下家连打两回合', () => {
   s.deadline = Date.now() - 1;
   k.applyAction(s, { type: 'tick' }, null);
 
-  assert.notStrictEqual(cur(s), me, '攻击后轮到下家');
-  assert.strictEqual(s.turnsLeft, 2, '下家要打两回合');
+  assert.notStrictEqual(cur(s), me, 'after an Attack it is the next players turn');
+  assert.strictEqual(s.turnsLeft, 2, 'the next player owes two turns');
 });
 
-test('不是当前玩家不能出牌/抽牌', () => {
+test('a player who is not the current one cannot play or draw', () => {
   const s = started(4);
   const other = s.order.find((id) => id !== cur(s));
   s.hands[other] = [CARD.SKIP];
@@ -215,27 +217,27 @@ test('不是当前玩家不能出牌/抽牌', () => {
   assert.ok(k.applyAction(s, { type: 'draw' }, other).error);
 });
 
-test('观战者不能行动', () => {
+test('spectators cannot act', () => {
   const s = started(4);
   assert.ok(k.applyAction(s, { type: 'draw' }, '__spectator__').error);
   assert.ok(k.applyAction(s, { type: 'nope' }, '__spectator__').error);
 });
 
-test('猫咪牌必须成对且需要目标', () => {
+test('cat cards must be paired and need a target', () => {
   const s = started(4);
   const me = cur(s);
   s.hands[me] = [CARD.CAT_TACO, CARD.CAT_TACO, CARD.DEFUSE];
   assert.ok(k.applyAction(s, { type: 'play', cards: [CARD.CAT_TACO] }, me).error,
-    '单张猫咪不能出');
+    'a lone cat card cannot be played');
   assert.ok(k.applyAction(s, { type: 'play', cards: [CARD.CAT_TACO, CARD.CAT_TACO] }, me).error,
-    '偷牌必须指定目标');
+    'stealing a card requires a target');
 });
 
-// ── 三张 / 五张猫咪 ──
+// ── Three-of-a-kind and five-different cat combos ──
 
 const settle = (s) => { s.deadline = Date.now() - 1; k.applyAction(s, { type: 'tick' }, null); };
 
-test('三张同款:指名要牌,对方有就必须给', () => {
+test('three matching cats: name a card, and the target must hand it over if they hold it', () => {
   const s = started(4);
   const me = cur(s);
   const t = s.order.find((id) => id !== me);
@@ -247,12 +249,13 @@ test('三张同款:指名要牌,对方有就必须给', () => {
   assert.ok(!r.error, r.error);
   settle(s);
 
-  assert.ok(s.hands[me].includes(CARD.DEFUSE), '应拿到指名的牌');
-  assert.ok(!s.hands[t].includes(CARD.DEFUSE), '对方应失去该牌');
+  assert.ok(s.hands[me].includes(CARD.DEFUSE), 'should receive the named card');
+  assert.ok(!s.hands[t].includes(CARD.DEFUSE), 'the target should lose that card');
 });
 
-test('三张同款:对方没有该牌则落空,且结果公开', () => {
-  // 落空本身是有价值的公开信息("他没有拆弹"),这正是三张牌的试探价值
+test('three matching cats: coming up empty is public, not hidden', () => {
+  // Coming up empty is itself valuable public information (they have no Defuse), and that
+  // probing value is the whole point of the three-card combo
   const s = started(4);
   const me = cur(s);
   const t = s.order.find((id) => id !== me);
@@ -264,26 +267,26 @@ test('三张同款:对方没有该牌则落空,且结果公开', () => {
   settle(s);
 
   assert.strictEqual(s.lastAction.type, 'demand');
-  assert.strictEqual(s.lastAction.success, false, '落空要如实记录');
-  assert.ok(s.log.some((e) => e.type === 'demand' && e.success === false), '落空要进公开日志');
+  assert.strictEqual(s.lastAction.success, false, 'coming up empty must be recorded faithfully');
+  assert.ok(s.log.some((e) => e.type === 'demand' && e.success === false), 'coming up empty must go into the public log');
 });
 
-test('三张必须报牌名,且必须同款', () => {
+test('three cards must name a target card, and must all match', () => {
   const s = started(4);
   const me = cur(s);
   const t = s.order.find((id) => id !== me);
   s.hands[me] = [CARD.CAT_TACO, CARD.CAT_TACO, CARD.CAT_TACO];
   assert.ok(k.applyAction(s,
     { type: 'play', cards: [CARD.CAT_TACO, CARD.CAT_TACO, CARD.CAT_TACO], target: t }, me).error,
-    '不报牌名应被拒');
+    'not naming a card should be rejected');
 
   s.hands[me] = [CARD.CAT_TACO, CARD.CAT_TACO, CARD.CAT_MELON];
   assert.ok(k.applyAction(s,
     { type: 'play', cards: [CARD.CAT_TACO, CARD.CAT_TACO, CARD.CAT_MELON], target: t, wanted: CARD.SKIP }, me).error,
-    '三张不同款应被拒');
+    'three non-matching cats should be rejected');
 });
 
-test('五张不同:从弃牌堆捡走指定的牌', () => {
+test('five different cats: take the named card from the discard pile', () => {
   const s = started(4);
   const me = cur(s);
   const five = [CARD.CAT_TACO, CARD.CAT_MELON, CARD.CAT_BEARD, CARD.CAT_RAINBOW, CARD.CAT_POTATO];
@@ -293,11 +296,11 @@ test('五张不同:从弃牌堆捡走指定的牌', () => {
   k.applyAction(s, { type: 'play', cards: five, wanted: CARD.DEFUSE }, me);
   settle(s);
 
-  assert.ok(s.hands[me].includes(CARD.DEFUSE), '应从弃牌堆拿到牌');
-  assert.ok(!s.discard.includes(CARD.DEFUSE), '弃牌堆里该牌应被取走');
+  assert.ok(s.hands[me].includes(CARD.DEFUSE), 'should take the card from the discard pile');
+  assert.ok(!s.discard.includes(CARD.DEFUSE), 'that card should be removed from the discard pile');
 });
 
-test('五张不能要弃牌堆里没有的牌', () => {
+test('five cats cannot ask for a card the discard pile does not hold', () => {
   const s = started(4);
   const me = cur(s);
   const five = [CARD.CAT_TACO, CARD.CAT_MELON, CARD.CAT_BEARD, CARD.CAT_RAINBOW, CARD.CAT_POTATO];
@@ -306,7 +309,7 @@ test('五张不能要弃牌堆里没有的牌', () => {
   assert.ok(k.applyAction(s, { type: 'play', cards: five, wanted: CARD.DEFUSE }, me).error);
 });
 
-test('三张/五张同样要过否决窗口', () => {
+test('three- and five-card combos also pass through the nope window', () => {
   const s = started(4);
   const me = cur(s);
   const t = s.order.find((id) => id !== me);
@@ -315,15 +318,15 @@ test('三张/五张同样要过否决窗口', () => {
 
   k.applyAction(s,
     { type: 'play', cards: [CARD.CAT_TACO, CARD.CAT_TACO, CARD.CAT_TACO], target: t, wanted: CARD.DEFUSE }, me);
-  assert.strictEqual(s.phase, 'nope', '要牌也能被否决');
+  assert.strictEqual(s.phase, 'nope', 'demanding a card can be noped too');
   k.applyAction(s, { type: 'nope' }, t);
   settle(s);
-  assert.ok(s.hands[t].includes(CARD.DEFUSE), '被否决后对方保住了牌');
+  assert.ok(s.hands[t].includes(CARD.DEFUSE), 'once noped, the target keeps their card');
 });
 
-// ── 索要(被索要者自选) ──
+// ── Favor (the target chooses which card to give) ──
 
-test('索要进入 favor 阶段,由被索要者自己挑牌', () => {
+test('Favor enters the favor phase, where the target picks the card themselves', () => {
   const s = started(4);
   const me = cur(s);
   const t = s.order.find((id) => id !== me);
@@ -332,22 +335,25 @@ test('索要进入 favor 阶段,由被索要者自己挑牌', () => {
 
   k.applyAction(s, { type: 'play', cards: [CARD.FAVOR], target: t }, me);
   settle(s);
-  assert.strictEqual(s.phase, 'favor', '索要生效后应等对方挑牌');
+  assert.strictEqual(s.phase, 'favor', 'once Favor resolves it should wait for the target to choose');
 
-  // 对方会给最没用的那张 —— 这正是原版的博弈点
+  // The target hands over their least useful card, which is exactly the tension the
+  // original game is built on
   k.applyAction(s, { type: 'give_card', card: CARD.SKIP }, t);
-  assert.ok(s.hands[me].includes(CARD.SKIP), '索要者应拿到对方给的牌');
-  assert.ok(s.hands[t].includes(CARD.DEFUSE), '对方留下了想留的牌');
+  assert.ok(s.hands[me].includes(CARD.SKIP), 'the asker should receive whichever card was given');
+  assert.ok(s.hands[t].includes(CARD.DEFUSE), 'the target kept the card they wanted to keep');
   assert.strictEqual(s.phase, 'playing');
-  assert.strictEqual(cur(s), me, '索要不结束回合');
+  assert.strictEqual(cur(s), me, 'Favor does not end the turn');
 });
 
-test('索要者看不到对方手牌,也不能替他选', () => {
-  // "给最没用的那张"这个博弈,前提就是索要者不知道对方在藏什么
+test('the asker cannot see the target hand, nor choose on their behalf', () => {
+  // The whole give-away-your-worst-card tension depends on the asker not knowing what the
+  // target is holding back
   const s = started(4);
   const me = cur(s);
   const t = s.order.find((id) => id !== me);
-  // 用一个只可能来自对方手牌的哨兵值,避免和自己的手牌/弃牌堆/日志混淆
+  // Use a sentinel value that could only have come from the target hand, so it cannot be
+  // confused with our own hand, the discard pile, or the log
   const CANARY = '__only_in_target_hand__';
   s.hands[me] = [CARD.FAVOR];
   s.hands[t] = [CARD.SKIP, CANARY];
@@ -359,16 +365,17 @@ test('索要者看不到对方手牌,也不能替他选', () => {
   assert.strictEqual(view.iAmGiving, false);
   assert.strictEqual(view.hands, undefined);
 
-  // 扫描整份视图(排除自己的手牌)。不能只检查已知字段名 —— 否则将来有人
-  // 为了做 UI 新加一个 targetHand 就漏过去了,而且不会有任何东西报错。
+  // Scan the entire view, excluding our own hand. Checking only the field names we know
+  // about is not enough: if someone later adds a targetHand field for the UI it would slip
+  // straight through, and nothing would complain.
   const dump = JSON.stringify({ ...view, myHand: null });
   assert.ok(!dump.includes(CANARY),
-    '索要者的视图里不该出现对方手牌的任何内容');
+    'nothing from the target hand should appear anywhere in the asker view');
 
-  assert.ok(k.applyAction(s, { type: 'give_card', index: 0 }, me).error, '不能替对方选牌');
+  assert.ok(k.applyAction(s, { type: 'give_card', index: 0 }, me).error, 'you cannot pick the card on the target behalf');
 });
 
-test('索要超时随机给一张,不会卡住', () => {
+test('a Favor that times out gives a random card rather than hanging', () => {
   const s = started(4);
   const me = cur(s);
   const t = s.order.find((id) => id !== me);
@@ -378,12 +385,12 @@ test('索要超时随机给一张,不会卡住', () => {
   settle(s);
   assert.strictEqual(s.phase, 'favor');
 
-  settle(s);   // favor 阶段再超时
-  assert.strictEqual(s.phase, 'playing', '超时应自动给牌并继续');
+  settle(s);   // let the favor phase time out as well
+  assert.strictEqual(s.phase, 'playing', 'a timeout should hand over a card automatically and carry on');
   assert.ok(s.hands[me].includes(CARD.SKIP));
 });
 
-test('对方没有手牌时索要直接跳过', () => {
+test('Favor is skipped outright when the target has no cards', () => {
   const s = started(4);
   const me = cur(s);
   const t = s.order.find((id) => id !== me);
@@ -391,23 +398,23 @@ test('对方没有手牌时索要直接跳过', () => {
   s.hands[t] = [];
   k.applyAction(s, { type: 'play', cards: [CARD.FAVOR], target: t }, me);
   settle(s);
-  assert.strictEqual(s.phase, 'playing', '没牌可给就不该进入等待阶段');
+  assert.strictEqual(s.phase, 'playing', 'with no card to give, it should never enter the waiting phase');
 });
 
-test('弃牌堆内容是公开的(五张需要据此挑牌)', () => {
+test('the discard pile is public (the five-card combo picks from it)', () => {
   const s = started(4);
   s.discard = [CARD.SKIP, CARD.ATTACK];
   const view = k.serializeStateFor(s, s.order[1]);
-  assert.deepStrictEqual(view.discard, [CARD.SKIP, CARD.ATTACK], '弃牌堆是桌面公开信息');
+  assert.deepStrictEqual(view.discard, [CARD.SKIP, CARD.ATTACK], 'the discard pile is public table information');
 });
 
-// ── 胜负 ──
+// ── Winning and losing ──
 
-test('只剩一人时结束,名次按出局顺序倒推', () => {
+test('the game ends with one player left, ranked by reverse elimination order', () => {
   const s = started(3);
   const a = s.order[0];
   s.hands[a] = []; s.deck = [CARD.BOMB];
-  k.applyAction(s, { type: 'draw' }, a);      // a 先出局
+  k.applyAction(s, { type: 'draw' }, a);      // a goes out first
   assert.strictEqual(s.alive[a], false);
 
   const nowCur = cur(s);
@@ -416,6 +423,6 @@ test('只剩一人时结束,名次按出局顺序倒推', () => {
 
   assert.strictEqual(s.phase, 'ended');
   const over = k.isGameOver(s);
-  assert.strictEqual(over.ranking.length, 3, '所有人都该有名次');
-  assert.strictEqual(over.ranking[over.ranking.length - 1].id, a, '最先出局的排最后');
+  assert.strictEqual(over.ranking.length, 3, 'everyone should have a rank');
+  assert.strictEqual(over.ranking[over.ranking.length - 1].id, a, 'whoever went out first places last');
 });
