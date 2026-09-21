@@ -8,7 +8,7 @@ import { useT } from './i18n.jsx';
 //        readyCount/readyTotal (how many others are ready)
 // Tapping "enter game" calls onDone(), which tells the server this player is ready;
 // once everyone is, the parent switches away from this intro.
-// The card face is an image at client/public/games/cards/card-<role>.png, falling back
+// The card face is an image at client/public/games/cards/card-<role>.webp, falling back
 // to emoji plus text if it fails to load.
 // Role colour and emoji are language-independent; the name and description come from
 // the string table (role.<id> / role.<id>.desc).
@@ -58,7 +58,7 @@ export default function RoleReveal({ role, onDone, ready = false, readyCount, re
               animation: `shuffle 0.5s ease-in-out ${i * 0.05}s infinite alternate`,
             }}>
               {backImgOk
-                ? <img src="/games/cards/card-back.png" alt="" style={imgStyle} onError={() => setBackImgOk(false)} />
+                ? <img src="/games/cards/card-back.webp" alt="" style={imgStyle} onError={() => setBackImgOk(false)} />
                 : <div style={backFallback}>🌙</div>}
             </div>
           ))}
@@ -77,7 +77,7 @@ export default function RoleReveal({ role, onDone, ready = false, readyCount, re
               {/* Back of the card */}
               <div style={{ ...cardBackStyle(backImgOk), position: 'absolute', inset: 0, backfaceVisibility: 'hidden' }}>
                 {backImgOk
-                  ? <img src="/games/cards/card-back.png" alt="" style={imgStyle} onError={() => setBackImgOk(false)} />
+                  ? <img src="/games/cards/card-back.webp" alt="" style={imgStyle} onError={() => setBackImgOk(false)} />
                   : <div style={backFallback}>🌙</div>}
               </div>
               {/* Front of the card (the role) */}
@@ -87,7 +87,7 @@ export default function RoleReveal({ role, onDone, ready = false, readyCount, re
                 background: 'var(--surface-2)', display: 'grid', placeItems: 'center',
               }}>
                 {faceImgOk ? (
-                  <img src={`/games/cards/card-${role}.png`} alt={meta.name} style={imgStyle}
+                  <img src={`/games/cards/card-${role}.webp`} alt={meta.name} style={imgStyle}
                     onError={() => setFaceImgOk(false)} />
                 ) : (
                   <div style={{ textAlign: 'center' }}>

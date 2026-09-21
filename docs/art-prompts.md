@@ -1,18 +1,19 @@
-# Image generation prompts for the missing art
+# Image generation prompts for the game art
 
-Three assets are missing. Each has a graceful fallback in code, so the app works
-without them — they are polish, not blockers.
+All three assets below now exist. The prompts are kept so that replacements, or
+art for a new game, can match the style the existing pieces established.
 
-| File | Size | Used by | Fallback today |
-|---|---|---|---|
-| `client/public/games/kittens.png` | 2752 × 1536 (16:9) | Lobby card for Exploding Kittens | Image hidden, card shows text only |
-| `client/public/games/cards/card-witch.png` | 1696 × 2528 (2:3) | Role reveal, 7+ players | 🧪 emoji + role name |
-| `client/public/games/cards/card-hunter.png` | 1696 × 2528 (2:3) | Role reveal, 10+ players | 🔫 emoji + role name |
+> **Adding or replacing art:** put the original PNG in `art-src/games/` (lobby
+> covers) or `art-src/games/cards/` (role cards), then run `npm run art` from
+> `client/`. That resizes it and writes the WebP the app actually serves into
+> `client/public/games/`.
+>
+> Do not put source PNGs in `client/public/` directly. The originals are around
+> 40x the size of the served copies -- the full set was 40MB before this step
+> existed, against 0.5MB after.
 
-Save each with the exact filename above. No code changes are needed — the paths
-are already wired up.
-
----
+| Asset | Source | Served | Used by |
+|---
 
 ## Shared style (the existing art all follows this)
 

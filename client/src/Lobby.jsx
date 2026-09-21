@@ -35,8 +35,8 @@ export default function Lobby({ me, connected, onCreate, onJoin, initialRoom, on
       {games.length === 0 && <p style={{ color: 'var(--muted)', fontSize: 13 }}>{t('lobby.loadingGames')}</p>}
       {games.map((g) => (
         <div key={g.id} style={{ ...ui.card, padding: 0, overflow: 'hidden' }}>
-          {/* Cover art (client/public/games/<id>.png); hidden if it fails to load, which leaves the card intact */}
-          <img src={`/games/${g.id}.png`} alt={gameName(t, g.id, g.displayName)}
+          {/* Cover art (client/public/games/<id>.webp); hidden if it fails to load, which leaves the card intact */}
+          <img src={`/games/${g.id}.webp`} alt={gameName(t, g.id, g.displayName)}
             style={{ width: '100%', aspectRatio: '16 / 9', objectFit: 'cover', objectPosition: 'center', display: 'block' }}
             onError={(e) => { e.currentTarget.style.display = 'none'; }} />
           <div style={{ display: 'flex', alignItems: 'center', padding: 14 }}>
